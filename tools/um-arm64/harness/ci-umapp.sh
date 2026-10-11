@@ -90,6 +90,8 @@ list=$(unzip -l "$APK" 2>/dev/null)
 for entry in classes.dex \
              lib/arm64-v8a/libuml.so lib/arm64-v8a/libstub.so \
              lib/arm64-v8a/libumnet.so lib/arm64-v8a/libpasst.so \
+             lib/arm64-v8a/libprobe.so lib/arm64-v8a/libappseccomp.so \
+             lib/arm64-v8a/libumusb.so \
              assets/initramfs.cpio.gz \
              res/xml/device_filter.xml; do
     if printf '%s\n' "$list" | grep -q " $entry\$"; then
@@ -105,7 +107,8 @@ done
 # library, or built for the host, would extract fine and then fail to exec.
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-for lib in libuml.so libstub.so; do
+for lib in libuml.so libstub.so libumnet.so libpasst.so \
+           libprobe.so libappseccomp.so libumusb.so; do
     if unzip -p "$APK" "lib/arm64-v8a/$lib" > "$tmp/$lib" 2>/dev/null && [ -s "$tmp/$lib" ]; then
         desc=$(file -b "$tmp/$lib")
         case "$desc" in

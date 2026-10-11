@@ -50,6 +50,13 @@ SRC=${SRC:-}				# passt checkout at the pinned commit, patched or not
 # to name /root/mlu-arm64, which told anyone else reading it very little and
 # made the script unusable anywhere else.
 UMNET=${UMNET:-$HERE/umnet.c}
+# The app-side helpers. Not networking, but the same thing: statically linked
+# bionic binaries the app execs out of nativeLibraryDir. They are built here
+# rather than in a script of their own so that "what the app can exec" is
+# defined in one place and CI has one call to keep working.
+APPSECCOMP=${APPSECCOMP:-$HERE/probe/appseccomp.c}
+UMUSB=${UMUSB:-$HERE/umusb.c}
+SOCKPROBE=${SOCKPROBE:-$HERE/probe/sockprobe.c}
 PATCH=${PATCH:-$HERE/../dist/passt-bionic.patch}
 ART=${ART:-$TREE/../artifacts}
 # Same level the kernel is built at, for the same reason: 30 is the oldest
@@ -173,6 +180,18 @@ $CC -O2 -Wall -Wextra -static -Wl,-z,max-page-size="$PAGE" \
 rc=${PIPESTATUS[0]}
 [ "$rc" = 0 ] || { echo "umnet build failed rc=$rc log=$LOG"; exit "$rc"; }
 
+### the app helpers -- one translation unit each, nothing to work around
+for spec in "$APPSECCOMP:appseccomp" "$UMUSB:umusb" "$SOCKPROBE:sockprobe"; do
+    src=${spec%:*}; name=${spec#*:}
+    [ -f "$src" ] || { echo "$name: no source at $src" >&2; exit 2; }
+    $CC -O2 -Wall -static -Wl,-z,max-page-size="$PAGE" \
+        -o "$O/$name" "$src" 2>&1 | tee -a "$LOG"
+    rc=${PIPESTATUS[0]}
+    [ "$rc" = 0 ] || { echo "$name build failed rc=$rc log=$LOG"; exit "$rc"; }
+    check_bin "$O/$name" || exit 1
+    cp -f "$O/$name" "$ART/${name}_bionic"
+done
+
 ### passt
 #
 # Build from a copy, never in $SRC: concurrent builds for other targets share
@@ -223,6 +242,9 @@ cp -f "$O/passt-src/passt" "$ART/passt_bionic"
 {
     echo "umnet_bionic: $(file -b "$ART/umnet_bionic" | cut -c1-90)"
     echo "passt_bionic: $(file -b "$ART/passt_bionic" | cut -c1-90)"
+    for n in appseccomp umusb sockprobe; do
+        echo "${n}_bionic: $(file -b "$ART/${n}_bionic" | cut -c1-90)"
+    done
     echo "md5=$(md5sum "$ART/umnet_bionic" | cut -c1-8)/$(md5sum "$ART/passt_bionic" | cut -c1-8)"
 } | tee -a "$LOG"
 echo "net helpers bionic build rc=0 log=$LOG"

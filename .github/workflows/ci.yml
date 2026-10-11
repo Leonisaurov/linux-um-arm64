@@ -397,6 +397,9 @@ jobs:
             install -m 0755 tools/um-arm64/dist/umdebian/install.sh "$A/$p/install.sh"
             install -m 0755 "$A/umnet_bionic" "$A/$p/umnet"
             install -m 0755 "$A/passt_bionic" "$A/$p/passt"
+            install -m 0755 "$A/appseccomp_bionic" "$A/$p/appseccomp"
+            install -m 0755 "$A/umusb_bionic"     "$A/$p/umusb"
+            install -m 0755 "$A/sockprobe_bionic" "$A/$p/sockprobe"
           done
           # The intermediate names were for the build, not for the artifact.
           rm -f "$A/umnet_bionic" "$A/passt_bionic"
@@ -534,6 +537,12 @@ jobs:
           install -m 0755 "$RUNNER_TEMP/artifacts/um-arm64-android/16k/stub_exe" "$ROOT/artifacts/stub_exe_bionic"
           install -m 0755 "$RUNNER_TEMP/artifacts/um-arm64-android/16k/umnet"    "$ROOT/dist/umdebian/umnet"
           install -m 0755 "$RUNNER_TEMP/artifacts/um-arm64-android/16k/passt"    "$ROOT/dist/umdebian/passt"
+          # The three the APK used to warn about: the seccomp checker, the USB/IP
+          # server, and the probe slot. build-apk.sh has always named them; what
+          # was missing was anything that produced them.
+          install -m 0755 "$RUNNER_TEMP/artifacts/um-arm64-android/16k/appseccomp" "$ROOT/dist/umdebian/appseccomp"
+          install -m 0755 "$RUNNER_TEMP/artifacts/um-arm64-android/16k/umusb"      "$ROOT/dist/umdebian/umusb"
+          install -m 0755 "$RUNNER_TEMP/artifacts/um-arm64-android/16k/sockprobe"  "$ROOT/artifacts/sockprobe_bionic"
           # The Alpine initramfs, which is the guest the app boots when it has
           # no disk image: a real busybox and a real shell. It used to be the
           # gate-2 fixture because the tree had no producer for an Alpine one.
