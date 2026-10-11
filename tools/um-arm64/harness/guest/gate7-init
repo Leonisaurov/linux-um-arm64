@@ -129,7 +129,5 @@ esac
 echo "GATE7 ok gcc=$(gcc -dumpversion) $out"
 echo "UMARM_BOOT_OK"
 
-poweroff -f
-
-sleep 5
-exit 0
+sync
+exec /umarm-poweroff

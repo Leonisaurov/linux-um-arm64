@@ -29,8 +29,13 @@ share removed.
 
 | job | runner | what it does |
 | --- | --- | --- |
-| `build` | `ubuntu-24.04-arm` | `ci-build.sh` builds `ARCH=um SUBARCH=arm64 LLVM=1` and emits the kernel, the freestanding `stub_exe`, and the exact `.config`; `mkinitramfs.sh` builds the gate-2 fixture |
-| `boot` (matrix) | `ubuntu-24.04-arm` | downloads the artifact and runs `native.sh` for each userspace mode |
+| `build` | `ubuntu-24.04-arm` | `ci-build.sh` builds `ARCH=um SUBARCH=arm64 LLVM=1` twice -- `arm64_defconfig`, and the same tree with `config/docker.config` merged -- and emits both kernels, the freestanding `stub_exe`, the exact `.config`s, the Alpine root filesystem, and the gate-2 fixture |
+| `boot` (matrix) | `ubuntu-24.04-arm` | downloads the artifact and runs `native.sh` for each gate, booting whichever kernel that gate names |
+| `umdebian` | `ubuntu-24.04-arm` | builds a Debian root filesystem, assembles `dist/umdebian`, and drives the shipped launcher through its documented contract with `ci-umdebian.sh` |
+
+The three jobs are independent after `build`, so a red `umdebian` does not hide
+which gate failed, and the two Debian-rootfs users each build their own image
+because the guest writes to it.
 
 The fixture is `harness/probe/guestinit.c` as `/init`: a freestanding aarch64
 binary with its own `_start`, raw `svc #0` calls, one guest capability per line.
@@ -178,6 +183,31 @@ g5-hostfs    GATE5 ok host_read='hello-from-host' blocks=256
 g7-debian    GATE7 ok gcc=12 GATE7_C_OK threads=4 counter=40000
 docker-prereqs  GATEDOCKER ok symbols=... controllers=...
 ```
+
+### The shipped artifact
+
+The `umdebian` job runs `harness/ci-umdebian.sh`, which gates the *product*
+rather than the kernel: `dist/umdebian` plus the launcher. Everything it checks
+is shell between a user and a booted kernel, which is exactly the layer that
+breaks silently and that no boot gate can see.
+
+A command goes in and only its output comes out -- `echo hello` produces the
+single line `hello`, not one line plus a boot log. Its exit status propagates
+(`exit 42` is 42, `false` is 1), so the launcher composes with a shell like any
+other command; `-v` still streams the boot log and still propagates the status,
+which it used to get wrong by returning 0 unconditionally. The share directory
+works in both directions, and the guest side is checked **on the host**: a guest
+saying it wrote a file is not evidence, the file existing in `share/` is. A
+command containing quotes and `\n` survives, because it travels through the share
+and not the kernel command line, which cannot carry either.
+
+The last check is the one worth naming. UML takes an `fcntl(F_SETLK)` write lock
+on the backing file, and the second instance gets `Failed to lock '<file>'`
+followed by a root-mount panic with a stack trace -- which reads like a corrupt
+filesystem and is not. The launcher turns that into one sentence, and the check
+holds the lock with `fcntl.lockf` for the same reason: `flock(2)` does not
+conflict with `fcntl` locks, so holding it with `flock(1)` would pass against a
+guest that booted perfectly.
 
 (`root=/dev/root` and not `/dev/ubda`: that is what the guest's own
 `/proc/mounts` reports for the device it was given, which is why `gate3-init`

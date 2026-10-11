@@ -3,6 +3,40 @@
 `ARCH=um SUBARCH=arm64` — a Linux kernel running as an ordinary aarch64 userspace
 process, so that a phone can run a real kernel without root, KVM or a hypervisor.
 
+## What it is for
+
+The useful thing is not that a kernel boots. It is that a **real Linux kernel
+runs as an ordinary process on a phone**, which gives an unrooted Android device
+things Android otherwise denies it:
+
+* **A real Debian userland.** `dist/umdebian` is a directory you copy to
+  `/data/local/tmp`: a kernel, a Debian bookworm image and a launcher.
+  `./deb uname -a` runs one command and prints only its output; `./deb` gives a
+  shell; files in `share/` are shared both ways. No root, no apk, no mounts, no
+  `/dev/kvm`, no user namespace. `rm -rf` removes it completely.
+* **A kernel you chose.** Android's kernel is whatever the vendor shipped -- 4.19
+  on hardware still being sold. Inside UML the syscall surface, the namespace and
+  cgroup behaviour and the page size are the ones in this tree, which is what
+  makes it a place to test *kernel-facing* code instead of touring an ABI nobody
+  can change.
+* **Containers without the privileges a container runtime needs.** The guest
+  kernel has real namespaces and cgroup v2, and `dockerd` with overlay2 runs
+  inside it on a host that refuses `/dev/kvm`. The prerequisites are what the
+  `docker-prereqs` CI gate pins, because that is where a variant of this port
+  once claimed "docker starts and runs" while every container create failed.
+* **Kernel work without a device.** The guest is a process on whatever machine
+  you already have: `gdb` attaches to it, a boot is a second rather than a
+  minute, and the same binary runs on a Pi, a runner, or the phone. That is what
+  makes the gate matrix below affordable rather than aspirational.
+* **The thin edges of the platform.** `dist/umapp` is an Android app that runs
+  the same kernel, and `doc/100-usb.md` hands a real RTL8811AU USB dongle to the
+  guest over USB/IP, which is how the port got `wlan0` and a scan on a phone.
+
+What it is **not**: hardware, a second CPU (the guest is uniprocessor), a 32-bit
+compat layer, or an escape from the host. Every guest syscall is a host syscall
+and the host still decides whether to allow it -- which is why the port's
+interesting bugs are all about the *host* interface, not about the guest.
+
 ## Status
 
 Working, and tested rather than asserted:
@@ -198,7 +232,11 @@ guest wrote being readable on the host; the FP/SIMD torture in both userspace
 modes; two of those gates again under an `LD_PRELOAD` shim that makes
 `personality()` fail, i.e. an Android host; a Debian image where the guest's own
 gcc compiles a libm-and-pthreads program that checks itself; and the docker
-prerequisites on a kernel built with `config/docker.config`. See
+prerequisites on a kernel built with `config/docker.config`. A separate job then
+verifies the **artifact** rather than the kernel -- `dist/umdebian`'s launcher,
+driven through the contract its README documents (a command in, its output out,
+its status propagated, the host share both ways, and a sentence instead of a
+stack trace when the image is already locked). See
 **[tools/um-arm64/CI.md](tools/um-arm64/CI.md)** for the pipeline, the ccache
 contract, the bugs the pipeline found, and how to run the same gates on any arm64
 Linux or on Termux (where `stub_exe=` is required, because Android's

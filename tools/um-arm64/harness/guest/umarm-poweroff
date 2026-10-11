@@ -1,0 +1,28 @@
+#!/bin/sh
+# Ask the guest kernel to power off, by whatever means this image happens to
+# have.
+#
+# It exists because the shipped Debian image is a debootstrap minbase rootfs
+# with no init system at all: `poweroff` comes from util-linux or sysvinit and
+# may simply not be present. PID 1 exiting is not a shutdown either -- the
+# kernel then prints "Attempted to kill init" and, under panic=-1, hangs, which
+# the launcher cannot tell from a guest that is still working.
+#
+# Installed into the image by mkrootfs.sh, next to the gate inits and
+# umarm-init. Absolute paths first because nothing here should depend on PATH.
+
+for c in "/sbin/poweroff -f" "/usr/sbin/poweroff -f" "/bin/poweroff -f" \
+         "/sbin/halt -f" "/usr/sbin/halt -f" "/bin/halt -f" \
+         "poweroff -f" "halt -f" "busybox poweroff -f"; do
+	$c >/dev/null 2>&1 && exit 0
+done
+
+# Last resort: the kernel's own power-off handler, which UML wires to
+# halt_skas() -- so the UML process exits, which is what the launcher waits on.
+# sysrq-trigger deliberately ignores /proc/sys/kernel/sysrq, so this does not
+# depend on the mask being non-zero. CONFIG_MAGIC_SYSRQ=y in arm64_defconfig.
+echo o > /proc/sysrq-trigger 2>/dev/null
+
+# If any of the above worked, this process is already gone.
+sleep 3
+exit 0

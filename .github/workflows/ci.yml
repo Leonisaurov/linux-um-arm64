@@ -126,6 +126,71 @@ jobs:
           path: ${{ runner.temp }}/artifacts/
           retention-days: 14
 
+  # The gates below prove the port. This job proves the *artifact*: the launcher
+  # a person actually uses, driven through the contract dist/umdebian/README.md
+  # documents -- a command in, its output out, its status propagated, the host
+  # share both ways, and a sentence instead of a stack trace when the image is
+  # already in use. It needs its own Debian image because the guest writes to it.
+  umdebian:
+    name: umdebian (shipped artifact)
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: um-arm64-kernels
+          path: ${{ runner.temp }}/artifacts
+
+      - name: Build Debian root filesystem
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends debootstrap e2fsprogs
+          DISTRO=debian SIZE=2G \
+            bash tools/um-arm64/harness/mkrootfs.sh "$RUNNER_TEMP/artifacts/debian.ext4"
+
+      - name: Verify the shipped launcher
+        run: |
+          set -euo pipefail
+          export WORK="$RUNNER_TEMP/run/umdebian"
+          export KERNEL_BIN="$RUNNER_TEMP/artifacts/default/linux-um-arm64"
+          export IMAGE="$RUNNER_TEMP/artifacts/debian.ext4"
+          bash tools/um-arm64/harness/ci-umdebian.sh
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: um-arm64-boot-umdebian
+          # Named individually on purpose: the run directory also holds the
+          # assembled distribution, which is a 2 GB image and not worth
+          # uploading. A list is safe here because both files are in one
+          # directory -- the artifact has no ancestor above them to be rooted at.
+          path: |
+            ${{ runner.temp }}/run/umdebian/result.txt
+            ${{ runner.temp }}/run/umdebian/checks.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Step summary
+        if: always()
+        run: |
+          {
+            echo "### umdebian (shipped artifact)"
+            echo '```'
+            cat "$RUNNER_TEMP/run/umdebian/result.txt" 2>/dev/null || echo "no result.txt"
+            echo '```'
+            echo "#### checks"
+            echo '```'
+            cat "$RUNNER_TEMP/run/umdebian/checks.txt" 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   boot:
     name: ${{ matrix.name }}
     needs: build

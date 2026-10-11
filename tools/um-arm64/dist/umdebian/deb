@@ -100,8 +100,18 @@ fi
 printf '%s\n' "$*" > "$SHARE/cmd"
 
 if [ "$VERBOSE" = 1 ]; then
-	$PIN $NET $KERNEL $COMMON con0=null,fd:1 2>&1 | cat
-	exit 0
+	# -v streams the whole boot log instead of only the command's output, but
+	# the exit status still has to be the command's: `./deb -v false` returning
+	# 0 would be a launcher that quietly changed what it ran.
+	log=$(mktemp) || exit 2
+	$PIN $NET $KERNEL $COMMON con0=null,fd:1 2>&1 | tee "$log" | cat
+	rc=$(sed -n 's/.*UMARM_EXIT=\([0-9]*\).*/\1/p' "$log" | tail -1)
+	rm -f "$log"
+	if [ -z "$rc" ]; then
+		echo "deb: the guest did not reach the command; the log above is the boot" >&2
+		exit 1
+	fi
+	exit "$rc"
 fi
 
 # Show the command's output and nothing else. The guest brackets it with

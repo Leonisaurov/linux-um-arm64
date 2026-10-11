@@ -97,7 +97,5 @@ fi
 echo "GATEDOCKER ok symbols=$(grep -c '^CONFIG_.*=y' /tmp/kconfig) controllers=$(cat /sys/fs/cgroup/cgroup.controllers)"
 echo "UMARM_BOOT_OK"
 
-poweroff -f
-
-sleep 5
-exit 0
+sync
+exec /umarm-poweroff

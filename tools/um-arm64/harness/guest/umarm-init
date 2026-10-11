@@ -1,0 +1,105 @@
+#!/bin/sh
+# PID 1 for the shipped umdebian image: Debian on an Android phone, running as
+# an ordinary unprivileged process.
+#
+# The launcher (dist/umdebian/deb) and the Android app (dist/umapp) both boot
+# this image with
+#
+#     init=/umarm-init ubd0=debian.ext4 root=/dev/ubda rw umarm.share=<dir>
+#
+# and this script implements exactly the contract they assume:
+#
+#   * `umarm.share=` names a directory *on the host*. It is a guest-side
+#     convention, not a kernel knob: this script reads it from /proc/cmdline and
+#     mounts it with hostfs. The image must not know where it is running -- an
+#     earlier version of the gate-5 image had the host path compiled into its
+#     init and stopped working the moment it moved to another machine.
+#
+#   * One-shot mode. If <share>/cmd exists, run it, bracket its output with
+#     UMARM_OUTPUT_BEGIN / UMARM_EXIT=<status> and power off. The launcher prints
+#     only what is between the markers and propagates the status, so a command
+#     that printed nothing and a boot that failed cannot look alike.
+#
+#   * Interactive mode. No <share>/cmd, so give a login shell on the console.
+#
+# Nothing is assumed about the image beyond a Debian userland and /bin/sh.
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+export PATH
+
+# Mount unless it is already mounted. The kernel mounts devtmpfs itself
+# (CONFIG_DEVTMPFS_MOUNT=y), and a second mount over it hides the first rather
+# than failing -- which is the kind of thing that looks fine until something
+# looks for a device node in the wrong place.
+mount_once() {
+	grep -q " $2 " /proc/mounts 2>/dev/null && return 0
+	mount -t "$1" "$3" "$2" 2>/dev/null
+}
+
+mkdir -p /proc /sys /dev /dev/pts /tmp /host
+mount_once proc     /proc    proc
+mount_once sysfs    /sys     sysfs
+mount_once devtmpfs /dev     devtmpfs
+mount_once devpts   /dev/pts devpts
+mount_once tmpfs    /tmp     tmpfs
+
+[ -r /proc/self/stat ] || echo "umarm-init: WARNING: procfs did not mount"
+
+# --- the host share ---------------------------------------------------------
+share=$(tr ' ' '\n' < /proc/cmdline 2>/dev/null |
+	sed -n 's/^umarm\.share=//p' | tail -1)
+
+if [ -n "$share" ]; then
+	# hostfs concatenates the mount option onto its own root, so the path goes
+	# in the mount and not in the image. (Without a `hostfs=` kernel argument
+	# there is no confinement: this mount exposes exactly the directory named
+	# here, and a mount with no option at all would expose the whole host.)
+	if mount -t hostfs none /host -o "$share" 2>/dev/null; then
+		echo "umarm-init: /host is $share"
+	else
+		echo "umarm-init: WARNING: cannot mount hostfs on $share"
+	fi
+else
+	echo "umarm-init: no umarm.share= on the command line, so there is no /host"
+fi
+
+# --- one command, or a shell ------------------------------------------------
+if [ -s /host/cmd ]; then
+	cmd=$(cat /host/cmd)
+
+	# Removed before it runs, so a guest that reboots for any reason cannot
+	# execute the same command twice, and so a stale file from an earlier run
+	# cannot be mistaken for a fresh request.
+	rm -f /host/cmd
+
+	echo "UMARM_OUTPUT_BEGIN"
+	/bin/sh -c "$cmd" 2>&1
+	rc=$?
+	echo "UMARM_EXIT=$rc"
+
+	sync
+	exec /umarm-poweroff
+fi
+
+# --- interactive ------------------------------------------------------------
+# setsid gives the shell a session and the console as its controlling terminal.
+# Without it bash reports "cannot set terminal process group" and "no job
+# control in this shell" on every start and ^C does not work, because PID 1 is
+# already the session leader and cannot claim the terminal itself.
+#
+# -f forces the fork and -w makes setsid wait for the shell, so PID 1 stays
+# alive to reap it. That matters: an exiting PID 1 is "Attempted to kill init"
+# and a panic under panic=-1, not a shutdown.
+#
+# Whether this setsid supports -c is probed rather than assumed -- util-linux
+# grew -c long after -w.
+echo "umdebian: $(uname -sr) $(uname -m), $(sed -n 's/^MemTotal:[[:space:]]*//p' /proc/meminfo)"
+echo "umdebian: files in /host are shared with the device; 'exit' powers off"
+if command -v setsid >/dev/null 2>&1 && setsid -f -c -w true 2>/dev/null; then
+	setsid -f -c -w /bin/bash -l
+else
+	/bin/bash -l
+fi
+
+sync
+exec /umarm-poweroff

@@ -12,8 +12,20 @@ new mounts, no `CLONE_NEWUSER`. Deleting the directory removes it completely.
 
     ./install.sh
 
-Pushes three files to `/data/local/tmp/umdebian`: the kernel (~78 MB), the
-Debian image (~300 MB compressed, 1.4 GB on disk), and the launcher.
+Pushes three files to `/data/local/tmp/umdebian`: the kernel, the Debian image
+(~1.4 GB on disk, gzipped in transit), and the launcher. Then it runs one command
+on the device and checks the answer, because three successful `adb push`es are
+not evidence that anything boots.
+
+    KERNEL=./linux-um-16k ./install.sh                # which kernel to ship
+    NO_COMPRESS=1 ./install.sh                        # push the image raw
+    ADB="adb -s 1A2B3C" DEST=/sdcard/umdebian ./install.sh
+
+The guest page size comes from the kernel's file name (`-4k` / `-16k`, how the
+builds are published) or from `GUEST_PAGESIZE`. It is not guessed, because the
+failure mode is a hang rather than an error, and `install.sh` refuses to install
+a guest page size below the device's host page size. Get the `-16k` build unless
+you know the device is 4 KiB: it runs on both.
 
 ## Use
 
@@ -51,8 +63,15 @@ launcher composes with the Android shell like any other command.
 full desktop install. There is no network, so it cannot be apt-installed here
 either; add it to the image before packaging if you want it.
 
-There is **no network** and **no systemd**. PID 1 is a small script that mounts
-`/proc`, `/sys`, `/dev`, and either runs your command or gives you a shell.
+There is **no network** and **no systemd**. PID 1 is `/umarm-init`, a small
+shell script (`tools/um-arm64/harness/guest/umarm-init`, installed into the image
+by `mkrootfs.sh`): it mounts `/proc`, `/sys`, `/dev`, `/dev/pts` and a tmpfs on
+`/tmp`, mounts the share from the `umarm.share=` kernel argument with hostfs, and
+then either runs the launcher's command or gives a login shell. Shutdown goes
+through `/umarm-poweroff` rather than `poweroff -f`, because this image has no
+init system at all and that binary may simply not be present -- and PID 1 exiting
+is not a shutdown: under `panic=-1` the kernel hangs instead, which the launcher
+cannot tell from a guest still working.
 
 ## Notes
 
