@@ -183,6 +183,12 @@ jobs:
       ANDROID_NDK_URL: https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
       ANDROID_NDK_SHA1: 090e8083a715fdb1a3e402d0763c388abb03fb4e
       ANDROID_API: '30'
+      # passt is pinned by commit, not by tag or by "latest": the patch below
+      # is a diff against exactly this tree, and it is the only way to know what
+      # the bionic port was written against. The short form of this hash is what
+      # the working binary reports as its version.
+      PASST_COMMIT: defc25b9444c508d21badb6bc9a0b835ddd01126
+      PASST_URL: https://passt.top/passt
       NDK_HOME: ${{ github.workspace }}/.ci/ndk
       # `github.workspace` and not `runner.temp`: the `runner` context does not
       # exist in a job-level `env:`, and using it does not fail this job -- it
@@ -289,6 +295,27 @@ jobs:
           export NAME=linux-um STUBNAME=stub_exe PAGESIZE=4k API="$ANDROID_API"
           bash tools/um-arm64/harness/build-bionic.sh
 
+      - name: Build the bionic networking helpers
+        run: |
+          set -euo pipefail
+          export NDK="$NDK_HOME/android-ndk-r27c"
+          export SRC="$RUNNER_TEMP/passt"
+          rm -rf "$SRC"
+          git clone -q "$PASST_URL" "$SRC"
+          git -C "$SRC" checkout -q "$PASST_COMMIT"
+          got=$(git -C "$SRC" rev-parse HEAD)
+          [ "$got" = "$PASST_COMMIT" ] || {
+            echo "passt pin mismatch: got $got" >&2
+            exit 1
+          }
+          export ART="$RUNNER_TEMP/android"
+          export PAGE=16384
+          bash tools/um-arm64/harness/build-net-bionic.sh
+          # 16 KB is the largest page size anything here runs on, and a larger
+          # alignment is harmless on a smaller one, so one build serves both
+          # directories.
+          ls -la "$ART"
+
       - name: Assemble the artifact
         run: |
           set -euo pipefail
@@ -296,7 +323,11 @@ jobs:
           for p in 16k 4k; do
             install -m 0755 tools/um-arm64/dist/umdebian/deb        "$A/$p/deb"
             install -m 0755 tools/um-arm64/dist/umdebian/install.sh "$A/$p/install.sh"
+            install -m 0755 "$A/umnet_bionic" "$A/$p/umnet"
+            install -m 0755 "$A/passt_bionic" "$A/$p/passt"
           done
+          # The intermediate names were for the build, not for the artifact.
+          rm -f "$A/umnet_bionic" "$A/passt_bionic"
           {
             echo "# Your own UML, for Android (bionic, aarch64)"
             echo
@@ -346,13 +377,13 @@ jobs:
             echo '`GUEST_PAGESIZE=16384` (or `4096`) explicitly here, because the file is'
             echo 'called `linux-um` and install.sh will not guess it from that.'
             echo
-            echo '## Not here yet: the networking helpers'
+            echo '## Networking is included'
             echo
-            echo '`umnet` and `passt`. `harness/build-net-bionic.sh` builds them, but it'
-            echo 'applies `dist/passt-bionic.patch`, which is not in the tree -- passt is a'
-            echo 'glibc/musl program and needs porting to bionic. An existing pair works with'
-            echo 'any kernel (they meet the kernel at a socketpair, not at a build), or run'
-            echo 'with `UMDEB_NET=0` and no networking at all.'
+            echo '`umnet` and `passt` are in each directory, built here from a pinned'
+            echo 'passt commit plus `dist/passt-bionic.patch`, so guest networking works'
+            echo 'out of the box: `./deb` finds them next to the kernel and uses them.'
+            echo 'Nothing needs root, a tap device or a user namespace; passt reaches the'
+            echo 'network by opening ordinary sockets. `UMDEB_NET=0` turns it off.'
             echo
             echo '## Verify it, on the device'
             echo

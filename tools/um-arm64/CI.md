@@ -249,6 +249,54 @@ Run on a MEGA 3 (Android 15, 4 KB host pages) against the artifact from commit
 `7.2.0-rc4-g05da2d23ca3d` -- the binary naming the commit it came from, which is
 the chain that makes a downloaded kernel checkable rather than trusted.
 
+**The networking helpers are built here too**, which is what makes the artifact
+self-contained. `passt` is pinned by *commit*
+(`defc25b9444c508d21badb6bc9a0b835ddd01126`) rather than by tag or by "latest",
+because `dist/passt-bionic.patch` is a diff against exactly that tree; the pin is
+also the short hash the working binary reports as its version
+(`passt defc25b-bionic`). The patch is 20 hunks in 10 files, in two groups.
+
+**Five runtime hunks**, which are why passt can run at all on Android:
+
+* `/proc/self/uid_map` missing means there is exactly one user namespace, so
+  `ns_is_init()` returns true instead of dying;
+* `unshare(CLONE_NEWUSER)` returning `EINVAL` means the kernel has no user
+  namespaces: warn and continue as the unprivileged uid it already is;
+* `unshare(CLONE_NEWIPC|NEWNS|NEWUTS)` returning `EPERM` means no
+  `CAP_SYS_ADMIN`, and everything after it in `isolate_prefork()` -- remounting
+  `/`, a private tmpfs, `pivot_root` -- needs the same privilege, so the whole
+  prefork isolation is skipped rather than failing one step at a time;
+* a netlink route socket cannot be **bound** by an untrusted app (SELinux allows
+  the shell uid and denies apps), and an unbound one cannot send either, so
+  `nl_sock_init()` warns instead of dying and the three discovery entry points
+  return "not found" -- which is correct, because umnet passes the entire
+  configuration on the command line;
+* `setgroups()`, `setgid()` and `setuid()` are **killed** by Android's app
+  seccomp policy with `SIGSYS`: not an error return, a death with no message and
+  no errno, which is why it took a probe to find. They are skipped, and there is
+  nothing to drop -- passt is already the unprivileged uid it was given. Asking
+  first does not work here, which is worth recording: the call that would tell
+  you the syscall is unavailable is the call that kills the process, and an app
+  really does have supplementary groups, so a `getgroups()`-based guard calls
+  `setgroups()` anyway.
+
+**Five bionic header hunks**: AOSP's uapi is neither glibc's nor musl's.
+`<resolv.h>` exists without `MAXNS`/`MAXDNSRCH`; `struct ipv6hdr` and
+`struct ipv6_opt_hdr` are already defined; `struct udphdr` was renamed to
+`__kernel_udphdr`, so `<linux/udp.h>` stops supplying it; there is no
+`<paths.h>`, so `_PATH_LOG` is defined in `log.c`; `<linux/virtio_ring.h>`
+carries the structures and none of the helpers, so `vring_need_event()` is copied
+from the kernel's own uapi; and `<inttypes.h>` is not pulled in transitively the
+way glibc and musl do it, so `PRIu16` needs an explicit include.
+
+It was verified the way this project verifies things: the patch applied to a
+**pristine checkout of the pin**, built for bionic, and the result booted a guest
+on a MEGA 3 that took a DHCP lease, reached `1.1.1.1:80` over TCP and resolved
+`example.com` -- identical to the prebuilt `passt` upstream ships in its release.
+The method that found the `SIGSYS` is worth keeping too: a probe that forks one
+syscall per child and reports which child is killed, because a seccomp death
+leaves nothing behind to read.
+
 ### The shipped artifact
 
 The `umdebian` job runs `harness/ci-umdebian.sh`, which gates the *product*

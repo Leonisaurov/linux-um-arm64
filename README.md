@@ -245,8 +245,10 @@ installed, and glibc's startup issues `rseq(2)` and `set_robust_list(2)`, which
 that filter kills; the binary dies before `main()` and prints nothing at all. So
 the `android` job builds the same kernel against the pinned **Android NDK** for
 bionic, at both page sizes, and publishes `um-arm64-android`: kernel, `stub_exe`,
-launcher and a `RUN.md` with the commands, ready to copy onto a phone and run.
-That is the artifact to download if what you want is your own UML.
+launcher, the two networking helpers (`umnet` and a `passt` built here from a
+pinned commit plus `dist/passt-bionic.patch`) and a `RUN.md` with the commands --
+ready to copy onto a phone and run, networking included. That is the artifact to
+download if what you want is your own UML.
 
 See **[tools/um-arm64/CI.md](tools/um-arm64/CI.md)** for the pipeline, the ccache
 contract, the bugs the pipeline found, and how to run the same gates on any arm64

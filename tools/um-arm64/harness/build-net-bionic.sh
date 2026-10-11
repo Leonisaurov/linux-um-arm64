@@ -27,11 +27,31 @@
 # kernel.
 set -uo pipefail
 
-SRC=${SRC:-/tmp/passt}			# passt checkout, patched or pristine
-UMNET=${UMNET:-/root/mlu-arm64/harness/umnet.c}
-PATCH=${PATCH:-/root/mlu-arm64/dist/passt-bionic.patch}
-ART=${ART:-/root/mlu-arm64/artifacts}
-NDK=${NDK:-/tmp/ndk/android-ndk-r27c}
+HERE=$(cd "$(dirname "$0")" && pwd)
+# Same layout detection as build-bionic.sh: the harness lives at <repo>/harness
+# in this tree and at <linux>/tools/um-arm64/harness when imported into a kernel
+# tree, and the kernel source is the parent of whichever one this is.
+if [ -f "$HERE/../linux/Makefile" ]; then
+    TREE=${TREE:-$(cd "$HERE/.." && pwd)/linux}
+elif [ -f "$HERE/../../../Makefile" ]; then
+    TREE=${TREE:-$(cd "$HERE/../../.." && pwd)}
+else
+    TREE=${TREE:-$(cd "$HERE/.." && pwd)}
+fi
+
+SRC=${SRC:-}				# passt checkout at the pinned commit, patched or not
+[ -n "$SRC" ] || {
+    echo "build-net-bionic.sh: set SRC=/path/to/passt" >&2
+    echo "  the pin and the patch are recorded in CI.md; the short version is" >&2
+    echo "  git clone https://passt.top/passt && git checkout defc25b9444c508d21badb6bc9a0b835ddd01126" >&2
+    exit 2
+}
+# Derived from where this script is, not from a home directory: this file used
+# to name /root/mlu-arm64, which told anyone else reading it very little and
+# made the script unusable anywhere else.
+UMNET=${UMNET:-$HERE/umnet.c}
+PATCH=${PATCH:-$HERE/../dist/passt-bionic.patch}
+ART=${ART:-$TREE/../artifacts}
 # Same level the kernel is built at, for the same reason: 30 is the oldest
 # bionic that declares everything used directly. The phone is API 35.
 API=${API:-30}
@@ -60,11 +80,41 @@ PAGE=${PAGE:-16384}
 # and complete a DHCP handshake on this build machine.
 EXTRA_SYSCALLS=${EXTRA_SYSCALLS:-}
 
-TOOL=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
-if [ ! -x "$TOOL/clang" ]; then
-    echo "no NDK at $NDK (set NDK=)" >&2
-    exit 2
+# The NDK, discovered the same way build-bionic.sh does it rather than assuming
+# one path: $NDK and the two variables Google's tooling sets first, then the
+# usual install locations, and the prebuilt for *this* host -- the stock NDK
+# carries linux-x86_64 only, so an aarch64 machine needs a repacked one.
+prebuilt_for_host() {
+    local prefer other d
+
+    case "$(uname -m)" in
+    aarch64 | arm64) prefer=linux-aarch64 ;;
+    x86_64 | amd64)  prefer=linux-x86_64 ;;
+    *)               prefer= ;;
+    esac
+    [ "$prefer" = linux-aarch64 ] && other=linux-x86_64 || other=linux-aarch64
+
+    for d in $prefer $other; do
+        [ -x "$1/toolchains/llvm/prebuilt/$d/bin/clang" ] && { echo "$d"; return 0; }
+    done
+    return 1
+}
+
+if [ -z "${NDK:-}" ]; then
+    for c in "${ANDROID_NDK_HOME:-}" "${ANDROID_NDK_ROOT:-}" \
+             "$HOME"/Android/ndk/* "$HOME"/Library/Android/sdk/ndk/* \
+             /usr/lib/android-ndk /opt/android-ndk* \
+             "${TMPDIR:-/tmp}"/ndk/android-ndk-*; do
+        [ -n "$c" ] && prebuilt_for_host "$c" >/dev/null && NDK=$c
+    done
 fi
+HOSTPRE=$(prebuilt_for_host "${NDK:-/nonexistent}") || {
+    echo "build-net-bionic.sh: no Android NDK found for this host (set NDK=)" >&2
+    echo "  looked at \$NDK, \$ANDROID_NDK_HOME, \$ANDROID_NDK_ROOT," >&2
+    echo "  ~/Android/ndk/*, /opt/android-ndk*, ${TMPDIR:-/tmp}/ndk/*" >&2
+    exit 2
+}
+TOOL=$NDK/toolchains/llvm/prebuilt/$HOSTPRE/bin
 CC="$TOOL/clang --target=aarch64-linux-android$API"
 
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
@@ -73,8 +123,8 @@ mkdir -p "$O" "$ART"
 
 {
     echo "### net helpers bionic build $STAMP"
-    echo "### ndk=$NDK api=$API page=$PAGE"
-    echo "### passt=$SRC head=$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null)"
+    echo "### ndk=$NDK api=$API page=$PAGE host_prebuilt=$HOSTPRE"
+    echo "### passt=$SRC head=$(git -C "$SRC" rev-parse HEAD 2>/dev/null)"
 } > "$LOG"
 
 # check_bin() - Fail unless $1 is a helper an Android app can actually exec

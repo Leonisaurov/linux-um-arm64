@@ -1,0 +1,368 @@
+diff --git a/checksum.c b/checksum.c
+index 7c62e42..36989fb 100644
+--- a/checksum.c
++++ b/checksum.c
+@@ -55,6 +55,13 @@
+ 
+ #include <linux/udp.h>
+ #include <linux/icmpv6.h>
++#if defined(__ANDROID__)
++/* AOSP's uapi renamed this to __kernel_udphdr, so <linux/udp.h> stops
++ * supplying struct udphdr there and checksum.h's forward declaration is all
++ * that is left. bionic's <netinet/udp.h> defines it, same layout.
++ */
++#include <netinet/udp.h>
++#endif
+ 
+ #include "util.h"
+ #include "ip.h"
+diff --git a/ip.h b/ip.h
+index aab9b86..a1e6c99 100644
+--- a/ip.h
++++ b/ip.h
+@@ -64,6 +64,11 @@
+ 		.daddr		= IN6ADDR_ANY_INIT,			\
+ 	}
+ 
++#ifndef __ANDROID__
++/* bionic's headers already define these two, with the same layout -- AOSP's
++ * <linux/ipv6.h> is pulled in transitively where glibc's and musl's are not --
++ * so defining them again is a redefinition rather than a portability fix.
++ */
+ struct ipv6hdr {
+ #pragma GCC diagnostic push
+ #pragma GCC diagnostic ignored "-Wpedantic"
+@@ -92,6 +97,7 @@ struct ipv6_opt_hdr {
+ 	 * TLV encoded option data follows.
+ 	 */
+ } __attribute__((packed));	/* required for some archs */
++#endif /* !__ANDROID__ */
+ 
+ /**
+  * ip6_set_flow_lbl() - Set flow label in an IPv6 header
+diff --git a/isolation.c b/isolation.c
+index a30b329..0d61590 100644
+--- a/isolation.c
++++ b/isolation.c
+@@ -311,7 +311,24 @@ void isolate_user(const struct ctx *c, uid_t uid, gid_t gid, bool use_userns,
+ {
+ 	uint64_t ns_caps = 0;
+ 
+-	/* First set our UID & GID in the original namespace */
++#if defined(__ANDROID__)
++	/* First set our UID & GID in the original namespace -- except that on
++	 * Android there is nothing here to do and no way to find that out.
++	 *
++	 * The app seccomp policy kills setgroups(), setgid(), setuid() and
++	 * setresgid() with SIGSYS rather than returning an error, so there is
++	 * no errno to check and no way to probe for it: a call that would tell
++	 * you the syscall is unavailable is the call that kills the process.
++	 * That rules out asking first, which is the obvious way to write this.
++	 *
++	 * Skipping is also the correct behaviour rather than a concession: passt
++	 * is already the unprivileged uid it was given, and the supplementary
++	 * groups an app has are the platform's (inet, sdcard_r), not privileges
++	 * it could shed. These calls exist to leave root, and there is no root.
++	 */
++	(void)uid;
++	(void)gid;
++#else
+ 	if (setgroups(0, NULL)) {
+ 		/* If we don't have CAP_SETGID, this will EPERM */
+ 		if (errno != EPERM)
+@@ -323,6 +340,7 @@ void isolate_user(const struct ctx *c, uid_t uid, gid_t gid, bool use_userns,
+ 
+ 	if (setuid(uid) != 0)
+ 		die_perror("Can't set UID to %u", uid);
++#endif
+ 
+ 	if (*userns) { /* If given a userns, join it */
+ 		int ufd;
+@@ -337,8 +355,17 @@ void isolate_user(const struct ctx *c, uid_t uid, gid_t gid, bool use_userns,
+ 		close(ufd);
+ 
+ 	} else if (use_userns) { /* Create and join a new userns */
+-		if (unshare(CLONE_NEWUSER) != 0)
+-			die_perror("Couldn't create user namespace");
++		/* EINVAL means the kernel has no user namespaces at all
++		 * (CONFIG_USER_NS unset), which is every Android kernel. Continue
++		 * as the unprivileged uid we already are: the seccomp filter below
++		 * still applies, and there were never any privileges to lose.
++		 */
++		if (unshare(CLONE_NEWUSER) != 0) {
++			if (errno != EINVAL)
++				die_perror("Couldn't create user namespace");
++			warn("No user namespaces (CONFIG_USER_NS?); continuing unsandboxed as uid %d",
++			     getuid());
++		}
+ 	}
+ 
+ 	/* Joining a new userns gives us full capabilities; drop the
+@@ -400,6 +427,16 @@ int isolate_prefork(const struct ctx *c)
+ 		flags |= CLONE_NEWPID;
+ 
+ 	if (unshare(flags)) {
++		/* EPERM without CAP_SYS_ADMIN, which is what an Android app
++		 * process has: no user namespace to create one in, and no
++		 * capabilities. Everything after this point -- remounting /, a
++		 * private tmpfs, pivot_root -- needs the same privilege, so skip
++		 * the whole prefork isolation rather than failing one step at a
++		 * time. The seccomp filter still applies.
++		 */
++		if (errno == EPERM)
++			return 0;
++
+ 		err_perror("Failed to detach isolating namespaces");
+ 		return -errno;
+ 	}
+diff --git a/log.c b/log.c
+index cbac2ef..45a23a5 100644
+--- a/log.c
++++ b/log.c
+@@ -23,6 +23,15 @@
+ #include <string.h>
+ #include <time.h>
+ #include <syslog.h>
++
++/* bionic has no <paths.h> at all, and _PATH_LOG is its only use here: the
++ * syslog socket. Android's syslog goes through logd, so there is no /dev/log
++ * and the connect() below fails -- which the caller already handles by falling
++ * back to stderr.
++ */
++#ifndef _PATH_LOG
++#define _PATH_LOG "/dev/log"
++#endif
+ #include <stdarg.h>
+ #include <sys/socket.h>
+ 
+diff --git a/netlink.c b/netlink.c
+index 8d20dbb..0e23dd0 100644
+--- a/netlink.c
++++ b/netlink.c
+@@ -63,6 +63,10 @@ static int nl_seq		=  1;
+ /* Socket for neighbour event notifier */
+ static int nl_sock_neigh	= -1;
+ 
++/* Why nl_sock ended up unusable, for the caller that reports it: the helper
++ * that fails is not the one that decides what to do about it. */
++static int nl_sock_errno	= 0;
++
+ /**
+  * nl_sock_init_do() - Set up netlink sockets in init or target namespace
+  * @arg:	Execution context, if running from namespace, NULL otherwise
+@@ -81,7 +85,22 @@ static int nl_sock_init_do(void *arg)
+ 		ns_enter((struct ctx *)arg);
+ 
+ 	*s = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
+-	if (*s < 0 || bind(*s, (struct sockaddr *)&addr, sizeof(addr))) {
++	if (*s < 0) {
++		nl_sock_errno = errno;
++		*s = -1;
++		return 0;
++	}
++	if (bind(*s, (struct sockaddr *)&addr, sizeof(addr))) {
++		/* An unprivileged Android uid cannot bind a netlink route
++		 * socket: SELinux allows the shell domain and denies untrusted
++		 * apps, and an unbound netlink socket cannot send either. passt
++		 * only needs this socket to *discover* addresses, routes and
++		 * interfaces, so with the whole configuration given explicitly
++		 * -- which is what umnet passes -- there is nothing to discover
++		 * and nothing to fail. The errno is kept for nl_sock_init().
++		 */
++		nl_sock_errno = errno;
++		close(*s);
+ 		*s = -1;
+ 		return 0;
+ 	}
+@@ -102,19 +121,18 @@ void nl_sock_init(const struct ctx *c, bool ns)
+ {
+ 	if (ns) {
+ 		NS_CALL(nl_sock_init_do, c);
+-		if (nl_sock_ns == -1)
+-			goto fail;
++		if (nl_sock_ns == -1) {
++			warn("No netlink socket (%s) in the target namespace; configuration must be explicit",
++			     strerror_(nl_sock_errno));
++			return;
++		}
+ 	} else {
+ 		nl_sock_init_do(NULL);
+ 	}
+ 
+ 	if (nl_sock == -1)
+-		goto fail;
+-
+-	return;
+-
+-fail:
+-	die("Failed to get netlink socket");
++		warn("No netlink socket (%s); configuration must be explicit",
++		     strerror_(nl_sock_errno));
+ }
+ 
+ /**
+@@ -263,6 +281,15 @@ static int nl_do(int s, void *req, uint16_t type, uint16_t flags, ssize_t len)
+  */
+ unsigned int nl_get_ext_if(int s, sa_family_t af)
+ {
++	/* No netlink socket: report "not found" rather than entering the
++	 * request/response code below, which has no socket to send on and no
++	 * response to parse. The caller already handles a negative result by
++	 * falling back to what the command line provided.
++	 */
++	if (s < 0)
++		return 0;
++
++
+ 	struct { struct nlmsghdr nlh; struct rtmsg rtm; } req = {
+ 		.rtm.rtm_table	 = RT_TABLE_MAIN,
+ 		.rtm.rtm_scope	 = RT_SCOPE_UNIVERSE,
+@@ -407,6 +434,15 @@ static bool nl_route_get_def_multipath(struct rtattr *rta, void *gw)
+  */
+ int nl_route_get_def(int s, unsigned int ifi, sa_family_t af, void *gw)
+ {
++	/* No netlink socket: report "not found" rather than entering the
++	 * request/response code below, which has no socket to send on and no
++	 * response to parse. The caller already handles a negative result by
++	 * falling back to what the command line provided.
++	 */
++	if (s < 0)
++		return -ENOTSUP;
++
++
+ 	struct req_t {
+ 		struct nlmsghdr nlh;
+ 		struct rtmsg rtm;
+@@ -763,6 +799,15 @@ int nl_addr_set_ll_nodad(int s, unsigned int ifi)
+ int nl_addr_get(int s, unsigned int ifi, sa_family_t af,
+ 		void *addr, int *prefix_len, void *addr_l)
+ {
++	/* No netlink socket: report "not found" rather than entering the
++	 * request/response code below, which has no socket to send on and no
++	 * response to parse. The caller already handles a negative result by
++	 * falling back to what the command line provided.
++	 */
++	if (s < 0)
++		return -ENOTSUP;
++
++
+ 	uint8_t prefix_max = 0, prefix_max_ll = 0;
+ 	struct req_t {
+ 		struct nlmsghdr nlh;
+diff --git a/passt.h b/passt.h
+index 51ccd4f..586018f 100644
+--- a/passt.h
++++ b/passt.h
+@@ -47,6 +47,17 @@ extern char *epoll_type_str[];
+ 
+ #include <resolv.h>	/* For MAXNS below */
+ 
++/* bionic ships a <resolv.h> that defines neither of these: Android resolves
++ * through netd, and the header is a shadow of the glibc one. passt uses them
++ * only as array bounds, so the glibc/musl values are the right fallback.
++ */
++#ifndef MAXNS
++#define MAXNS		3
++#endif
++#ifndef MAXDNSRCH
++#define MAXDNSRCH	6
++#endif
++
+ /**
+  * struct fqdn - Representation of fully-qualified domain name
+  * @n:		Domain name string
+diff --git a/tcp.c b/tcp.c
+index 3b78d2e..172b7ce 100644
+--- a/tcp.c
++++ b/tcp.c
+@@ -327,8 +327,11 @@
+  */
+ #define OPTLEN_MAX (((1UL << 4) - 1 - 5) * 4UL)
+ 
+-#ifndef __USE_MISC
+-/* From Linux UAPI, missing in netinet/tcp.h provided by musl */
++#if !defined(__USE_MISC) && !defined(__ANDROID__)
++/* From Linux UAPI, missing in netinet/tcp.h provided by musl. bionic does not
++ * define __USE_MISC either -- that is a glibc macro -- but its netinet/tcp.h
++ * does carry these, so the workaround must not apply there.
++ */
+ struct tcp_repair_opt {
+ 	__u32	opt_code;
+ 	__u32	opt_val;
+@@ -764,7 +767,8 @@ static void tcp_rtt_dst_check(const struct tcp_tap_conn *conn,
+ 	for (i = 0; i < LOW_RTT_TABLE_SIZE; i++) {
+ 		if (inany_equals(&tapside->oaddr, low_rtt_dst + i))
+ 			return;
+-		if (hole == -1 && IN6_IS_ADDR_UNSPECIFIED(low_rtt_dst + i))
++		if (hole == -1 &&
++		    inany_is_unspecified6(low_rtt_dst + i))
+ 			hole = i;
+ 	}
+ 
+diff --git a/util.c b/util.c
+index 28c32e4..5a96978 100644
+--- a/util.c
++++ b/util.c
+@@ -392,8 +392,16 @@ bool ns_is_init(void)
+ 	bool ret = true;
+ 	int fd;
+ 
+-	if ((fd = open("/proc/self/uid_map", O_RDONLY | O_CLOEXEC)) < 0)
++	if ((fd = open("/proc/self/uid_map", O_RDONLY | O_CLOEXEC)) < 0) {
++		/* A kernel built without CONFIG_USER_NS has no uid_map at all,
++		 * and a missing one means there is exactly one user namespace
++		 * and we are in it. Android kernels are built that way.
++		 */
++		if (errno == ENOENT)
++			return true;
++
+ 		die_perror("Can't determine if we're in init namespace");
++	}
+ 
+ 	if (read(fd, buf, sizeof(root_uid_map)) != sizeof(root_uid_map) - 1 ||
+ 	    strncmp(buf, root_uid_map, sizeof(root_uid_map)))
+diff --git a/util.h b/util.h
+index 2435f53..c3241e5 100644
+--- a/util.h
++++ b/util.h
+@@ -7,6 +7,11 @@
+ #define UTIL_H
+ 
+ #include <assert.h>
++/* glibc and musl drag <inttypes.h> in from headers these files already use;
++ * bionic does not, and PRIu16/PRIu32/PRIu64 appear in format strings all over
++ * the project, so it is included here rather than one file at a time.
++ */
++#include <inttypes.h>
+ #include <stdlib.h>
+ #include <stdarg.h>
+ #include <stdbool.h>
+diff --git a/virtio.c b/virtio.c
+index d7016cc..f402bb0 100644
+--- a/virtio.c
++++ b/virtio.c
+@@ -178,6 +178,24 @@ static inline uint16_t *virtq_used_event(const struct vu_virtq *vq)
+  *         specifies how far the device can progress before a notification
+  *         is required.
+  */
++#if defined(__ANDROID__)
++/*
++ * bionic's <linux/virtio_ring.h> carries the structures and none of the
++ * helpers, so vring_need_event() is missing there. Copied from
++ * include/uapi/linux/virtio_ring.h in the kernel tree, comment included, so the
++ * arithmetic is not something invented here.
++ */
++static inline int vring_need_event(__u16 event_idx, __u16 new_idx, __u16 old)
++{
++	/* Note: Xen has similar logic for notification hold-off
++	 * in include/xen/interface/io/ring.h with req_event and req_prod
++	 * corresponding to event_idx + 1 and new_idx respectively.
++	 * Note also that req_event and req_prod in Xen start at 1,
++	 * event indexes in virtio start at 0. */
++	return (__u16)(new_idx - event_idx - 1) < (__u16)(new_idx - old);
++}
++#endif
++
+ static inline uint16_t vring_get_used_event(const struct vu_virtq *vq)
+ {
+ 	return le16toh(*virtq_used_event(vq));

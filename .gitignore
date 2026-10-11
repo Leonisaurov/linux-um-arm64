@@ -44,6 +44,10 @@
 *.o
 *.o.*
 *.patch
+# A vendored patch is source here, not a build artifact. The rule above is the
+# kernel's own, for quilt series and mail; this one is the bionic port of passt,
+# and the patch is the only form in which that work exists.
+!tools/um-arm64/dist/passt-bionic.patch
 *.pyc
 *.rlib
 *.rmeta
