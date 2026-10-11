@@ -165,6 +165,21 @@ jobs:
           find "$O" -name '*.ko' -exec cp -v {} "$ART/modules/" \;
           ls -la "$ART/modules"
 
+      # The fault-injection kernel: start_userspace() fails on its N-th call, which
+      # is the only way to reach init_new_context()'s error path on demand. The
+      # stubfail gate is the reachability test for it, and the kernel goes away
+      # with the step.
+      - name: Build the stubfail kernel (mm_list fault injection)
+        run: |
+          set -euo pipefail
+          git apply --check tools/um-arm64/config/inject-stub-fail.patch
+          git apply tools/um-arm64/config/inject-stub-fail.patch
+          trap 'git checkout -- arch/um/os-Linux/skas/process.c' EXIT
+          export O="$RUNNER_TEMP/umarm-build-stubfail"
+          export ART="$RUNNER_TEMP/artifacts/stubfail"
+          export CCACHE_DIR="$RUNNER_TEMP/ccache"
+          bash tools/um-arm64/harness/ci-build.sh
+
       - name: Build Alpine root filesystem
         run: |
           set -euo pipefail
