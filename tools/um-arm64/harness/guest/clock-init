@@ -17,12 +17,15 @@ fail() { echo "GATECLOCK_FAIL: $*"; }
 mkdir -p /proc /sys /dev 2>/dev/null
 mount -t proc proc /proc 2>/dev/null
 
-command -v clockprobe >/dev/null 2>&1 || {
+# Absolute, like every other gate calls its probe: compile_probe installs into the
+# guest's root and busybox's default PATH does not contain it. Called by name it
+# failed as "not in the guest image" for a probe that was there all along.
+[ -x /clockprobe ] || {
 	fail "clockprobe is not in the guest image"
 	exit 1
 }
 
-clockprobe
+/clockprobe
 rc=$?
 case "$rc" in
 0) ;;
