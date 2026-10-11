@@ -491,6 +491,15 @@ Each of these was invisible to the port's original machine and immediate here:
    it. Worth recording because it survived several green runs: a summary that
    says "no result.txt" looks like a run with nothing to report.
 
+8. **`EXPECT_BUG: unbound variable`, which turned all fifteen boot gates red at
+   once.** `native.sh` runs under `set -u`, and the new `EXPECT_BUG` had no
+   default, so `[ -n "$EXPECT_BUG" ]` was itself an unbound-variable error on
+   every gate that is not a control. The local test passed because it always
+   *set* the variable, including as the empty string -- and under `set -u`
+   defined-but-empty is not the same thing as unset. One line
+   (`EXPECT_BUG=${EXPECT_BUG:-}`), and the lesson is about the test: a harness
+   that supplies every input cannot catch a missing default.
+
 ## Running the same gates locally
 
 ### On any arm64 Linux

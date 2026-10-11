@@ -39,6 +39,12 @@ INIT=${INIT:-/bin/sh}
 STUB_EXE=${STUB_EXE:-}
 PRELOAD=${PRELOAD:-}
 PRELOAD_MARKER=${PRELOAD_MARKER:-}
+# EXPECT_BUG is set only by a negative control. It still needs a default: the
+# script runs under set -u, so `[ -n "$EXPECT_BUG" ]` is itself an unbound
+# variable error when the caller did not set it -- which is every ordinary gate.
+# The local test that missed this passed EXPECT_BUG="" for the ordinary cases,
+# and defined-but-empty is not the same thing as unset.
+EXPECT_BUG=${EXPECT_BUG:-}
 # HOSTFS is a directory on this machine that the guest will mount through UML's
 # hostfs. The path travels in the kernel command line, not inside the guest
 # image: an image that carries its own host path stops working the moment it
