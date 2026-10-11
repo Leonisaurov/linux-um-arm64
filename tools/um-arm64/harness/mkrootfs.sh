@@ -59,7 +59,26 @@ fetch() {
 }
 
 STAGE=$(mktemp -d "${TMPDIR:-/tmp}/umarm-rootfs.XXXXXX")
-trap 'rm -rf "$STAGE"' EXIT
+
+# debootstrap leaves a root-owned tree -- which is what the image has to contain,
+# so chowning it to the invoking user is not an option -- and mke2fs records that
+# ownership. Everything written into $STAGE after debootstrap therefore needs the
+# same privilege, and so does deleting it again: the first version of this ran
+# `rm -rf $STAGE` as the user, failed on every file debootstrap had left, and
+# turned a successful build into exit 1 at the trap.
+in_stage() {
+    if [ "$DISTRO" = debian ]; then
+        $SUDO "$@"
+    else
+        "$@"
+    fi
+}
+
+cleanup() {
+    in_stage rm -rf "$STAGE" 2>/dev/null || true
+    return 0
+}
+trap cleanup EXIT
 
 case "$DISTRO" in
 alpine)
@@ -84,8 +103,8 @@ debian)
         --include="$DEBIAN_INCLUDE" "$DEBIAN_SUITE" "$STAGE" "$DEBIAN_MIRROR"
     # Identification, and a root that needs no password: this guest is reached
     # only through the UML console, never over a network.
-    echo umarm-guest > "$STAGE/etc/hostname"
-    printf '127.0.0.1\tlocalhost umarm-guest\n' > "$STAGE/etc/hosts"
+    printf '%s\n' umarm-guest | in_stage tee "$STAGE/etc/hostname" >/dev/null
+    printf '127.0.0.1\tlocalhost umarm-guest\n' | in_stage tee "$STAGE/etc/hosts" >/dev/null
     ;;
 *)
     echo "mkrootfs.sh: unknown DISTRO=$DISTRO (alpine|debian)" >&2
@@ -100,25 +119,33 @@ esac
 # are freestanding binaries (their own _start, raw svc #0), so no guest libc and
 # no dynamic loader are involved and --target alone selects the architecture.
 for f in "$HERE"/guest/*; do
-    install -m 0755 "$f" "$STAGE/$(basename "$f")"
+    in_stage install -m 0755 "$f" "$STAGE/$(basename "$f")"
 done
 
 compile_probe() {
-    local src=$1 name=$2
+    local src=$1 name=$2 tmp
 
+    tmp=$(mktemp "${TMPDIR:-/tmp}/umarm-probe.XXXXXX")
+
+    # Compiled as the invoking user and installed with the tree's privilege:
+    # there is no reason to run a compiler as root, and on the Debian path the
+    # destination is not writable without it.
     "$CC" --target="$TARGET" -static -nostdlib -ffreestanding -O1 \
-          -fno-stack-protector -fno-pic -o "$STAGE/$name" "$src"
+          -fno-stack-protector -fno-pic -o "$tmp" "$src"
 
     # ET_EXEC, not ET_DYN: nothing relocates a PIE in a rootfs whose loader is
     # the guest's, and a DYN probe would fail in a way that looks like the
     # kernel faulting on the first instruction.
-    python3 - "$STAGE/$name" <<'PY'
+    python3 - "$tmp" <<'PY'
 import struct, sys
 p = sys.argv[1]
 d = open(p, "rb").read(20)
 if d[:4] != b"\x7fELF" or struct.unpack_from("<H", d, 16)[0] != 2:
     sys.exit(f"{p} is not a static ET_EXEC aarch64 ELF")
 PY
+
+    in_stage install -m 0755 "$tmp" "$STAGE/$name"
+    rm -f "$tmp"
 }
 
 compile_probe "$HERE/probe/fptorture.c" fptorture

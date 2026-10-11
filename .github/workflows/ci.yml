@@ -279,7 +279,11 @@ jobs:
           export EXTRA_ARGS="${{ matrix.extra }}"
           [ -z "${{ matrix.initrd }}" ] || export INITRD="$RUNNER_TEMP/artifacts/${{ matrix.initrd }}"
           [ -z "${{ matrix.ubd0 }}" ]   || export UBD0="$RUNNER_TEMP/artifacts/${{ matrix.ubd0 }}"
-          [ -z "${{ matrix.preload }}" ] || export PRELOAD="$RUNNER_TEMP/artifacts/${{ matrix.preload }}"
+          # Per-kernel files live next to the kernel they were built with, not at
+          # the artifact root: the build job writes two kernels into two
+          # directories, and only the shared fixtures (initramfs, disk images)
+          # are at the top.
+          [ -z "${{ matrix.preload }}" ] || export PRELOAD="$RUNNER_TEMP/artifacts/${{ matrix.kernel }}/${{ matrix.preload }}"
           [ -z "${{ matrix.preload_marker }}" ] || export PRELOAD_MARKER="${{ matrix.preload_marker }}"
           if [ "${{ matrix.hostfs }}" = yes ]; then
             export HOSTFS="$RUNNER_TEMP/hostshare"
