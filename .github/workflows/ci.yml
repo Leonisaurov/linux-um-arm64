@@ -120,6 +120,26 @@ jobs:
           export CCACHE_DIR="$RUNNER_TEMP/ccache"
           bash tools/um-arm64/harness/ci-build.sh
 
+      # Loadable modules. The code is wired for this subarch and the config is
+      # off, so what these gates answer is whether the loader actually works
+      # when the host is a userspace process. `make modules` needs the kernel
+      # built first, which is why this runs ci-build.sh twice.
+      - name: Build kernel (modules config)
+        run: |
+          set -euo pipefail
+          export O="$RUNNER_TEMP/umarm-build-modules"
+          export ART="$RUNNER_TEMP/artifacts/modules"
+          export CCACHE_DIR="$RUNNER_TEMP/ccache"
+          export EXTRA_CONFIG="tools/um-arm64/config/modules.config"
+          bash tools/um-arm64/harness/ci-build.sh
+          bash tools/um-arm64/harness/ci-build.sh modules
+          # The .ko lands deep in the object tree. Collected here because the
+          # gate loads it through a hostfs share, and a gate that silently finds
+          # no module is worse than one that fails.
+          mkdir -p "$ART/modules"
+          find "$O" -name '*.ko' -exec cp -v {} "$ART/modules/" \;
+          ls -la "$ART/modules"
+
       - name: Build Alpine root filesystem
         run: |
           set -euo pipefail
@@ -536,7 +556,7 @@ jobs:
           - { name: g4-alpine,    kernel: default, ubd0: alpine.ext4, init: /gate4-init,          marker: UMARM_BOOT_OK,   timeout: "900", extra: "rw" }
           # --- gate 5: hostfs. The check that matters is on this side of the
           # boundary: the file the guest wrote has to be readable here.
-          - { name: g5-hostfs,    kernel: default, ubd0: alpine.ext4, init: /gate5-init,          marker: UMARM_BOOT_OK,   timeout: "300", extra: "rw", hostfs: "yes" }
+          - { name: g5-hostfs,    kernel: default, ubd0: alpine.ext4, init: /gate5-init,          marker: UMARM_BOOT_OK,   timeout: "300", extra: "rw", hostfs: "yes", hostfs_check: "renamed-guest.txt" }
           # --- FP/SIMD: the state that is not the GPR set. Not redundant
           # between the two: the port's fixed bug here was seccomp-specific.
           - { name: fp-ptrace,    kernel: default, ubd0: alpine.ext4, init: /fp-init,             marker: FPTORTURE_OK,    timeout: "600", extra: "rw" }
@@ -579,6 +599,19 @@ jobs:
           # the runner's pages are larger rather than hanging.
           - { name: rss-4k,      kernel: 4k,      ubd0: debian.ext4, init: /rss-init,           marker: UMARM_BOOT_OK,   timeout: "900", extra: "rw", debian: "yes" }
           - { name: rss-control, kernel: control, ubd0: debian.ext4, init: /rss-init,           marker: UMARM_BOOT_OK,   timeout: "900", extra: "rw", debian: "yes", expect_bug: "Bad rss-counter" }
+          # --- gate 10: loadable modules, at the three memory sizes that decide
+          # which relocation path the loader takes. The module arrives through a
+          # hostfs share, so hostfs_check is empty on purpose: there is no file
+          # for the guest to write back here, and a check that cannot be
+          # satisfied would fail every run.
+          #
+          # mem=64M: no PLT needed. mem=512M: the module is far enough from the
+          # kernel text that CALL26 cannot reach and PLTs are mandatory.
+          # mem=3G: ADRP near its limit, which exercises the veneer. Testing only
+          # the default skips the whole PLT path while looking green.
+          - { name: mod-64m,     kernel: modules, ubd0: alpine.ext4, init: /module-init,        marker: UMARM_BOOT_OK,   timeout: "600", extra: "rw", hostfs: "yes", hostfs_check: "", mem: "64M" }
+          - { name: mod-512m,    kernel: modules, ubd0: alpine.ext4, init: /module-init,        marker: UMARM_BOOT_OK,   timeout: "600", extra: "rw", hostfs: "yes", hostfs_check: "", mem: "512M" }
+          - { name: mod-3g,      kernel: modules, ubd0: alpine.ext4, init: /module-init,        marker: UMARM_BOOT_OK,   timeout: "600", extra: "rw", hostfs: "yes", hostfs_check: "", mem: "3G" }
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -647,7 +680,10 @@ jobs:
           export MARKER="${{ matrix.marker }}"
           export INIT="${{ matrix.init }}"
           export TIMEOUT="${{ matrix.timeout }}"
-          export MEM=512M
+          # Only the module gates vary it, and the size is part of what they
+          # test rather than a detail of the fixture.
+          export MEM="${{ matrix.mem }}"
+          [ -n "$MEM" ] || export MEM=512M
           export EXTRA_ARGS="${{ matrix.extra }}"
           [ -z "${{ matrix.initrd }}" ] || export INITRD="$RUNNER_TEMP/artifacts/${{ matrix.initrd }}"
           [ -z "${{ matrix.ubd0 }}" ]   || export UBD0="$RUNNER_TEMP/artifacts/${{ matrix.ubd0 }}"
@@ -662,7 +698,16 @@ jobs:
           [ -z "${{ matrix.expect_bug }}" ] || export EXPECT_BUG="${{ matrix.expect_bug }}"
           if [ "${{ matrix.hostfs }}" = yes ]; then
             export HOSTFS="$RUNNER_TEMP/hostshare"
-            export HOSTFS_CHECK="renamed-guest.txt"
+            export HOSTFS_CHECK="${{ matrix.hostfs_check }}"
+            # The module gates get their .ko from the share, so whatever the
+            # kernel build collected goes in before the guest starts. Copied
+            # rather than linked: the share is read by the guest through hostfs
+            # and by the check below on this side.
+            if [ -d "$RUNNER_TEMP/artifacts/${{ matrix.kernel }}/modules" ]; then
+              mkdir -p "$HOSTFS"
+              cp "$RUNNER_TEMP/artifacts/${{ matrix.kernel }}/modules/"*.ko "$HOSTFS/"
+              ls -la "$HOSTFS"
+            fi
           fi
           bash tools/um-arm64/harness/native.sh
 

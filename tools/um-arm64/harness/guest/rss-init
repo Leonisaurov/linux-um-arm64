@@ -64,6 +64,16 @@ ext2|ext3|ext4)	;;
 *) fail "/var/tmp is not on an ext filesystem: $(df -T /var/tmp 2>/dev/null | tail -1)" ;;
 esac
 
+# And that it is writable. The root can come up read-only without saying so:
+# open_ubd_file() drops to read-only when the backing file cannot be opened for
+# writing -- which is what a root-owned image on a runner that is not root does --
+# and `rw` on the command line is then quietly ignored. This check exists because
+# the first version of this gate failed with an empty message for exactly that
+# reason, the error having gone to the program's stderr rather than to its output.
+touch /var/tmp/.rss-write-test 2>/dev/null ||
+	fail "/var/tmp is not writable, so the root is read-only: $(df -T /var/tmp 2>/dev/null | tail -1)"
+rm -f /var/tmp/.rss-write-test
+
 cat > /tmp/rss.c <<'EOF'
 #define _GNU_SOURCE
 #include <fcntl.h>
@@ -204,7 +214,7 @@ for i in 1 2 3 4 5 6 7 8; do
 done
 ldd /bin/sh >/dev/null 2>&1 || fail "the dynamic loader is not working"
 
-out=$(/tmp/rss) || fail "the guest's own workload failed: $out"
+out=$(/tmp/rss 2>&1) || fail "the guest's own workload failed: $out"
 case "$out" in
 *RSS_TOUCHED*) ;;
 *) fail "no summary line: $out" ;;

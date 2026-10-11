@@ -412,7 +412,23 @@ by hand. Twice.
 
 ## Gate 10: loadable modules
 
-Not started, and ranked **above** seccomp mode: without modules no guest driver
+**Started, and gated.** The header plumbing this section said to settle first is
+already in the tree -- `arch/arm64/um/asm/module.h`, `arch/arm64/um/asm/module.lds.h`
+and an empty `arch/arm64/um/asm/debug-monitors.h` that exists exactly so the
+reused `arch/arm64/lib/insn.c` does not reach the generated `asm/sysreg-defs.h` --
+and `arch/arm64/um/Makefile` already builds `module.o`, `module-plts.o` and
+`insn.o`. The answer to the unbounded risk in the paragraph below is the cheap
+one: `insn.c` needs `AARCH64_BREAK_FAULT` from `asm/insn-def.h` and nothing else
+from `<asm/debug-monitors.h>`.
+
+So what was missing was not code but an answer: `arm64_defconfig` says
+`# CONFIG_MODULES is not set`, and nothing had ever loaded a module here. The
+gates are `config/modules.config` plus `harness/guest/module-init`, loading a real
+`.ko` (from `make modules` on the same tree) through hostfs at `mem=64M`, `512M`
+and `3G` -- the three sizes that decide which relocation path is taken, per the
+paragraph below about the PLT.
+
+Ranked **above** seccomp mode: without modules no guest driver
 loads at all, whereas seccomp is a speed and sandbox-surface optimisation. The
 design is settled enough to start.
 

@@ -29,7 +29,7 @@ share removed.
 
 | job | runner | what it does |
 | --- | --- | --- |
-| `build` | `ubuntu-24.04-arm` | `ci-build.sh` builds `ARCH=um SUBARCH=arm64 LLVM=1` four times -- `arm64_defconfig`; the same tree with `config/docker.config` merged; the same tree at `PAGE_SIZE=4k`; and the same tree with `config/control-ptrs-per-pte.patch` applied, which is the negative control for the rss gate -- and emits each kernel, the freestanding `stub_exe`, the exact `.config`s, the Alpine root filesystem, and the gate-2 fixture |
+| `build` | `ubuntu-24.04-arm` | `ci-build.sh` builds `ARCH=um SUBARCH=arm64 LLVM=1` five times -- `arm64_defconfig`; the same tree with `config/docker.config` merged; the same tree at `PAGE_SIZE=4k`; the same tree with `config/modules.config` merged (plus `make modules`, whose `.ko` the module gates load through hostfs); and the same tree with `config/control-ptrs-per-pte.patch` applied, which is the negative control for the rss gate -- and emits each kernel, the freestanding `stub_exe`, the exact `.config`s, the Alpine root filesystem, and the gate-2 fixture |
 | `net-helpers` | `ubuntu-24.04-arm` | builds `umnet` and gates it with `ci-umnet.sh`: no kernel, no passt and no root needed |
 | `android` | `ubuntu-24.04-arm` | builds the kernel against the **Android NDK** for bionic, at 16 KB and 4 KB, and publishes `um-arm64-android` -- the artifact to download and run on a phone |
 | `boot` (matrix) | `ubuntu-24.04-arm` | downloads the artifact and runs `native.sh` for each gate, booting whichever kernel that gate names |
@@ -62,6 +62,9 @@ installed on Termux and is an avoidable moving part.
 | `g5-hostfs` | Alpine ext4 on `ubd0` | `rw` + `hostfs=<dir>` | the host filesystem bridge, verified from the host side |
 | `g7-debian` | Debian ext4 on `ubd0` | `rw` | a real gcc and glibc in the guest, with the program's output checked |
 | `docker-prereqs` | Debian ext4 on `ubd0` | `rw` (kernel built with `docker.config`) | cgroup v2, overlayfs, namespaces, veth/bridge, nftables |
+| `mod-64m` | Alpine ext4 on `ubd0` | `rw`, `hostfs=<dir>`, `mem=64M` | gate 10: a real `.ko` through hostfs, loaded with `insmod`, at the memory size where no PLT is needed |
+| `mod-512m` | Alpine ext4 on `ubd0` | `rw`, `hostfs=<dir>`, `mem=512M` | the same module where the module region is far enough from the kernel text that `CALL26` cannot reach and PLTs are mandatory |
+| `mod-3g` | Alpine ext4 on `ubd0` | `rw`, `hostfs=<dir>`, `mem=3G` | the same module where `ADRP` is near its limit and the veneer path runs |
 | `rss-16k` | Debian ext4 on `ubd0` | `rw` | the rss counters at 16 KB pages: large folios on ext4, faulted in through a file mapping, one mm freed per child |
 | `rss-4k` | Debian ext4 on `ubd0` | `rw` (kernel built at `PAGE_SIZE=4k`) | the same workload at 4 KB pages, which the port's own notes leave untested. Skipped with a reason on a host whose pages are larger, because a 4 KB guest cannot boot there |
 | `rss-control` | Debian ext4 on `ubd0` | `rw` (kernel built with the literal `PTRS_PER_PTE`) | the negative control: it must *reproduce* `Bad rss-counter`, and a control that does not is reported as a failure of the control |
@@ -170,6 +173,31 @@ precedent is in that config's own comments: a variant once dropped `CGROUP_BPF`
 and recorded that "docker starts and runs". Docker started, containers did not,
 because runc calls `bpf_prog_query(BPF_CGROUP_DEVICE)` on every create. This gate
 would have caught that without running dockerd.
+
+The `mod-*` fixtures are `harness/guest/module-init`, and gate 10 turned out to
+be a config change rather than a port: the loader is already wired for this
+subarch -- `arch/arm64/um/Makefile` builds the parent architecture's `module.c`,
+`module-plts.c` and `insn.c`, and `arch/arm64/um/asm/{module.h,module.lds.h}`
+supply the `struct mod_arch_specific` and the `.plt`/`.init.plt` sections those
+need under `ARCH=um` -- and `arm64_defconfig` simply says
+`# CONFIG_MODULES is not set`. What was missing was not code but an answer, which
+is what these three gates produce: nothing had ever loaded a module in this port.
+
+The module is not a hand-written fixture. It comes through hostfs from
+`make modules` on the same tree that built the kernel, so it is a real `.ko` with
+real relocations against real kernel symbols. `binfmt_misc` is the one chosen
+because its job is visible from userspace: it registers a filesystem, so it
+appears in `/proc/filesystems`, and that only happens if its init function ran
+and its calls into the kernel landed at valid addresses. `/proc/modules` alone
+would not say so -- a module can be listed there with its relocations applied to
+the wrong addresses.
+
+The three entries differ only in `mem=`, and that is the test rather than a
+detail: the module region's placement decides which relocation paths are taken.
+At 64M no PLT is needed; at 512M the module is far enough from the kernel text
+that a direct `CALL26` cannot reach and PLTs are mandatory; at 3G `ADRP` is near
+its limit and the veneer path runs. A single run at the default would skip the
+entire PLT path while looking green.
 
 The `rss-*` fixtures are `harness/guest/rss-init`, and the reason there are three
 of them is the whole point of the exercise. `check_mm()` runs unconditionally
@@ -499,6 +527,27 @@ Each of these was invisible to the port's original machine and immediate here:
    defined-but-empty is not the same thing as unset. One line
    (`EXPECT_BUG=${EXPECT_BUG:-}`), and the lesson is about the test: a harness
    that supplies every input cannot catch a missing default.
+
+9. **The Debian image was root-owned, and UML silently made the root read-only.**
+   `mkrootfs.sh` runs `sudo mke2fs` for the Debian tree -- debootstrap leaves
+   root-owned files and device nodes that have to survive into the image -- and
+   that also means the image *file* comes out root-owned. The boot job runs as
+   `runner`, so `open_ubd_file()` could not open the backing file for writing,
+   and it falls back to read-only on EACCES without a word:
+
+   ```c
+   if (!openflags->w || ((fd != -EROFS) && (fd != EACCES)))
+           return fd;
+   openflags->w = 0;
+   ```
+
+   So `rw` on the kernel command line was quietly ignored and the guest got a
+   read-only root. It went unnoticed because no gate had ever written to that
+   image -- g7 compiles in a tmpfs and the docker gate writes to tmpfs too -- so
+   the first gate that tried (the rss one) is the one that found it. Fixed by
+   chowning the image to the invoking user after mke2fs, and the rss fixture now
+   checks that /var/tmp is writable so that the next occurrence names itself
+   instead of failing with an empty message.
 
 ## Running the same gates locally
 

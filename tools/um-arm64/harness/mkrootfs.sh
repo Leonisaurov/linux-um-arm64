@@ -159,6 +159,21 @@ MKE2FS=()
 rm -f "$OUT"
 "${MKE2FS[@]}" mke2fs -q -F -t ext4 -b 4096 -L "umarm-$DISTRO" -d "$STAGE" "$OUT" "$SIZE"
 
+# The image has to belong to the invoking user, not to whoever ran mke2fs. With
+# sudo the file is created root-owned, and then UML cannot open it for writing --
+# and open_ubd_file() *silently* falls back to read-only on EACCES:
+#
+#     if (!openflags->w || ((fd != -EROFS) && (fd != -EACCES)))
+#             return fd;
+#     openflags->w = 0;
+#
+# So `rw` on the command line was quietly ignored, the guest got a read-only
+# root, and nothing said so. No gate had ever written to the Debian image, which
+# is why this went unnoticed until one did.
+if [ "$DISTRO" = debian ]; then
+    $SUDO chown "$(id -u):$(id -g)" "$OUT"
+fi
+
 # A populated image is the point; an empty one would still "build" and the gate
 # would then fail with "no /gate3-init" instead of naming the real problem.
 stats=$(dumpe2fs -h "$OUT" 2>/dev/null | awk -F: '
