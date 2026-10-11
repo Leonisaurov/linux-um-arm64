@@ -584,6 +584,21 @@ Each of these was invisible to the port's original machine and immediate here:
    the gate said `no .ko in the host share`. The fragment now names the modules it
    wants, which is the only way for them to survive the order the build runs in.
 
+11. **`ls` plus `pipefail` plus `2>/dev/null` is a silent exit.** The APK job
+   failed with `Process completed with exit code 2` and *no output at all*.
+   `build-apk.sh` runs under `set -euo pipefail`, and the line that picks the
+   newest build-tools was
+
+       BT=${BT:-$(ls -d "$SDK"/build-tools/* /tmp/bt*/android-* 2>/dev/null | ...)}
+
+   On the runner `/tmp/bt*/android-*` matches nothing, `ls` exits 2 for that, the
+   pipeline's status under `pipefail` becomes 2, the assignment inherits it, and
+   `set -e` ends the script -- with the reason discarded by `2>/dev/null`. The
+   fix is a picker that always succeeds, which leaves the script's own checks to
+   report a missing toolchain in words. Reproduced locally before fixing, under
+   `set -euo pipefail` rather than in an interactive shell: the first version of
+   the local test had not set `pipefail` and therefore passed.
+
 ## Running the same gates locally
 
 ### On any arm64 Linux

@@ -38,8 +38,23 @@ ROOT=${ROOT:-$(cd "$HERE/../.." && pwd)}
 # the lowest version found made that failure depend on which build-tools happened
 # to be unpacked.
 SDK=${ANDROID_HOME:-/usr/local/lib/android/sdk}
-BT=${BT:-$(ls -d "$SDK"/build-tools/* /tmp/bt*/android-* 2>/dev/null | sort -V | tail -1)}
-ANDROID_JAR=${ANDROID_JAR:-$(ls "$SDK"/platforms/android-*/android.jar 2>/dev/null | sort -V | tail -1)}
+# The globs are expanded by the shell and filtered here rather than passed to
+# ls: `ls` exits 2 when one of its arguments matches nothing, and under
+# `set -o pipefail` that status becomes the pipeline's, which the assignment
+# inherits, which `set -e` turns into a silent exit. That is exactly what happened
+# on the CI runner, where /tmp/bt*/android-* does not exist: the script printed
+# nothing and exited 2, because `2>/dev/null` had discarded ls's complaint.
+# A picker that always succeeds leaves the checks below to report a missing
+# toolchain in words.
+pick() {
+	local p
+	for p in "$@"; do
+		if [ -e "$p" ]; then printf '%s\n' "$p"; fi
+	done
+	return 0
+}
+BT=${BT:-$(pick "$SDK"/build-tools/* /tmp/bt*/android-* | sort -V | tail -1)}
+ANDROID_JAR=${ANDROID_JAR:-$(pick "$SDK"/platforms/android-*/android.jar | sort -V | tail -1)}
 OUT=${OUT:-$HERE/build}
 APK=${APK:-$HERE/umarm.apk}
 
