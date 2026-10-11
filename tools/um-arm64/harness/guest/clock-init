@@ -17,7 +17,7 @@ fail() { echo "GATECLOCK_FAIL: $*"; }
 mkdir -p /proc /sys /dev 2>/dev/null
 mount -t proc proc /proc 2>/dev/null
 
-command -v clockcheck >/dev/null 2>&1 || {
+command -v clockprobe >/dev/null 2>&1 || {
 	fail "clockprobe is not in the guest image"
 	exit 1
 }
