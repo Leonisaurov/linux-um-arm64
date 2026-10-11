@@ -78,9 +78,21 @@ Not working, or not finished:
   clean log cannot be mistaken for a workload that never reached the code.
 - **No cpuset controller.** `CONFIG_CPUSETS` depends on `SMP` and UML is
   uniprocessor. `docker info` warns and runs; there is nothing to pin to.
-- Guest vDSO time (`clock_gettime` without a host syscall) is written but not
-  merged: it does not fit a 4 KB page and needs `GENERIC_VDSO_OVERFLOW_PROTECT`,
-  without which guest time wraps after tens of minutes.
+- **No guest vDSO time, and it is not a gap to be filled.** The vDSO this port
+  installs exports `__kernel_rt_sigreturn` and nothing else
+  (`arch/arm64/um/vdso/vdso.lds.S`), which is load-bearing -- glibc aarch64
+  needs it for signal return. A time vDSO is inapplicable rather than missing:
+  `clock_gettime` in a UML guest can only be answered by the host's clock, and
+  reaching it costs a syscall, so that same file says a fast path "would save
+  nothing". x86 UML reached the same conclusion and ships time functions that
+  are syscall stubs (`arch/x86/um/vdso/um_vdso.c`).
+  `GENERIC_VDSO_OVERFLOW_PROTECT` is not a dependency of this port: it protects
+  the `delta * mult` of a fast path reading a clocksource from a shared data
+  page, and with no data page there is nothing to protect.
+  The guest's clock *is* the host's -- `timer_read()` divides `os_nsecs()`, the
+  host's `CLOCK_MONOTONIC` (`arch/um/os-Linux/time.c`), by `TIMER_MULTIPLIER`
+  (`arch/um/kernel/time.c`) -- so it cannot drift. What was genuinely untested
+  is the *rate*: see `doc/70-vdso.md`.
 
 Three bugs worth naming, all found by running the port on phones rather than by
 reading it, and all fixed on this branch:
