@@ -42,7 +42,13 @@ CON0=${CON0:-null,fd:1}
 
 log() { printf '[native] %s\n' "$*"; }
 
-[ -x "$BIN" ] || { echo "native.sh: no executable kernel at BIN=$BIN" >&2; exit 2; }
+[ -f "$BIN" ] || { echo "native.sh: no kernel at BIN=$BIN" >&2; exit 2; }
+# GitHub Actions artifacts do not carry the executable bit back out of the zip,
+# so a kernel that was 0755 when uploaded arrives 0644. Fix it here rather than
+# in each caller, and only if the file is actually there.
+[ -x "$BIN" ] || chmod +x "$BIN"          2>/dev/null || true
+[ -x "$BIN" ] || { echo "native.sh: $BIN is not executable" >&2; exit 2; }
+[ -z "$STUB_EXE" ] || chmod +x "$STUB_EXE" 2>/dev/null || true
 
 # One run at a time. A UML that outlived its timeout still holds locks on its
 # ubd image; a second run would then fail for reasons that have nothing to do

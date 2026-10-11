@@ -150,6 +150,7 @@ jobs:
       - name: Boot gate
         run: |
           set -euo pipefail
+          ls -la "$RUNNER_TEMP/artifacts"
           export BIN="$RUNNER_TEMP/artifacts/linux-um-arm64"
           export INITRD="$RUNNER_TEMP/artifacts/initramfs.cpiogz"
           export ART="$RUNNER_TEMP/run"
