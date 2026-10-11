@@ -78,7 +78,10 @@ jobs:
           bash tools/um-arm64/harness/ci-build.sh
 
       - name: Build initramfs gate fixture
-        run: bash tools/um-arm64/harness/mkinitramfs.sh "$RUNNER_TEMP/initramfs.cpiogz"
+        run: |
+          set -euo pipefail
+          export ART="$RUNNER_TEMP/artifacts"
+          bash tools/um-arm64/harness/mkinitramfs.sh "$ART/initramfs.cpiogz"
 
       - name: ccache stats
         if: always()
@@ -93,16 +96,16 @@ jobs:
           path: ${{ runner.temp }}/ccache
           key: ccache-um-arm64-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
 
+      # Uploaded as one directory, not a list of files. upload-artifact roots an
+      # artifact at the least common ancestor of its paths, so a list spanning
+      # $RUNNER_TEMP/artifacts/* and $RUNNER_TEMP/initramfs.cpiogz gets rooted at
+      # $RUNNER_TEMP and downloads back as artifacts/artifacts/... . Everything
+      # the boot job needs already lives under $ART, so upload exactly that.
       - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
         with:
           name: um-arm64-kernel
-          path: |
-            ${{ runner.temp }}/artifacts/linux-um-arm64
-            ${{ runner.temp }}/artifacts/stub_exe
-            ${{ runner.temp }}/artifacts/kernel.config
-            ${{ runner.temp }}/artifacts/build.txt
-            ${{ runner.temp }}/initramfs.cpiogz
+          path: ${{ runner.temp }}/artifacts/
           retention-days: 14
 
   boot:
