@@ -178,6 +178,23 @@ Related probes worth knowing about: `harness/probe/vethprobe.c` creates a veth
 pair over rtnetlink, because busybox's `ip` does not know the veth link type and
 fails identically whether or not `CONFIG_VETH` is set — useless as a test.
 
+## CI
+
+`.github/workflows/ci.yml` builds and boots the kernel on GitHub's
+`ubuntu-24.04-arm` runner. That runner is a real arm64 host, so `./linux` is
+built and booted on the same machine and the `qemu-system-aarch64` run domain
+the rest of these documents describe is not needed: no cross-compilation, no
+TCG, no ssh staging. `harness/native.sh` is `boot.sh`'s verdict logic with the
+VM removed.
+
+The gate is the marker string in the boot log plus an independent
+`BUG:`/`WARNING:` scan, and the matrix runs the built-in ptrace default,
+`seccomp=on`, and the `nosysemu` cancellation fallback that pre-5.3 arm64
+kernels take. See **[tools/um-arm64/CI.md](tools/um-arm64/CI.md)** for the
+pipeline, the ccache contract, the four bugs the pipeline found, and how to run
+the same gates on any arm64 Linux or on Termux (where `stub_exe=` is required,
+because Android's `untrusted_app` domain refuses `execveat` on a memfd).
+
 ## Benchmarks
 
 Measured on the Poco F3, `adb shell`, guest running `perfbench`. Every column of

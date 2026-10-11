@@ -52,12 +52,20 @@ log() { printf '[native] %s\n' "$*"; }
 
 # One run at a time. A UML that outlived its timeout still holds locks on its
 # ubd image; a second run would then fail for reasons that have nothing to do
-# with the kernel under test.
-exec 9>"${TMPDIR:-/tmp}/umarm-native.lock"
-if ! flock -w "${LOCK_WAIT:-3600}" 9; then
-    echo "native.sh: another native run holds the run domain" >&2
-    exit 2
+# with the kernel under test. flock is not present on every Termux install, so
+# the lock is taken when it can be and skipped when it cannot.
+if command -v flock >/dev/null 2>&1; then
+    exec 9>"${TMPDIR:-/tmp}/umarm-native.lock"
+    if ! flock -w "${LOCK_WAIT:-3600}" 9; then
+        echo "native.sh: another native run holds the run domain" >&2
+        exit 2
+    fi
 fi
+
+command -v timeout >/dev/null 2>&1 || {
+    echo "native.sh: timeout(1) is required (coreutils)" >&2
+    exit 2
+}
 
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 OUT="$ART/$GATE/$STAMP"
