@@ -149,47 +149,6 @@ jobs:
           export ART="$RUNNER_TEMP/artifacts/control-clock"
           export CCACHE_DIR="$RUNNER_TEMP/ccache"
           bash tools/um-arm64/harness/ci-build.sh
-
-      # The fix under test for the mm_list use-after-free, with the fault
-      # injection that makes the error path reachable. start_userspace() is made
-      # to fail on its N-th call (config/inject-stub-fail.patch, N from the boot
-      # row's stubfail=N). The guest drives enough fork/exec calls to reach it
-      # and then keeps going; with the fix in place it must reach its marker.
-      # ART's basename is the kernel name the boot matrix uses.
-      - name: Build the stubfail kernel (mm_list fault injection)
-        run: |
-          set -euo pipefail
-          git apply --check tools/um-arm64/config/inject-stub-fail.patch
-          git apply tools/um-arm64/config/inject-stub-fail.patch
-          trap 'git checkout -- arch/um/os-Linux/skas/process.c' EXIT
-          export O="$RUNNER_TEMP/umarm-build-stubfail"
-          export ART="$RUNNER_TEMP/artifacts/stubfail"
-          export CCACHE_DIR="$RUNNER_TEMP/ccache"
-          bash tools/um-arm64/harness/ci-build.sh
-
-      # The negative control for that fix: the same injection with the list_del
-      # reverted (config/control-mm-list.patch). The freed mm stays linked, the
-      # next allocation folds mm_list into a cycle, and the next SIGCHLD walk
-      # spins -- the guest cannot reach its marker. A control that does not
-      # reproduce is a failure of the control, not a pass. Both patches are
-      # reverted on exit so every other build sees a pristine tree.
-      - name: Build the control kernel (mm_list negative control)
-        run: |
-          set -euo pipefail
-          git apply --check tools/um-arm64/config/inject-stub-fail.patch
-          git apply --check tools/um-arm64/config/control-mm-list.patch
-          git apply tools/um-arm64/config/inject-stub-fail.patch
-          git apply tools/um-arm64/config/control-mm-list.patch
-          trap 'git checkout -- arch/um/os-Linux/skas/process.c arch/um/kernel/skas/mmu.c' EXIT
-          export O="$RUNNER_TEMP/umarm-build-stubfail-control"
-          export ART="$RUNNER_TEMP/artifacts/stubfail-control"
-          export CCACHE_DIR="$RUNNER_TEMP/ccache"
-          bash tools/um-arm64/harness/ci-build.sh
-
-      # Loadable modules. The code is wired for this subarch and the config is
-      # off, so what these gates answer is whether the loader actually works
-      # when the host is a userspace process. `make modules` needs the kernel
-      # built first, which is why this runs ci-build.sh twice.
       - name: Build kernel (modules config)
         run: |
           set -euo pipefail
@@ -842,8 +801,14 @@ jobs:
           # walk loops. The fixed row requires the injection diagnostic; the
           # control expects that same diagnostic plus the hang verdict, so a
           # control that does not reproduce is a failure of the control.
+          # The init_new_context() error path, exercised on purpose. The injection
+          # fires exactly once and the guest must survive it: reaching the marker
+          # means the path is reachable and survivable, which it had never been in
+          # CI. It is not a control for the list_del fix -- a control was built
+          # (config/control-mm-list.patch) and does *not* reproduce under this
+          # workload, which is recorded in doc/60-continuation.md rather than
+          # papered over with a row that cannot fail.
           - { name: stubfail,         kernel: stubfail,         ubd0: alpine.ext4, init: /stubfail-init, marker: UMARM_BOOT_OK, timeout: "900", extra: "rw stubfail=1000", require: "start_userspace failed STUBFORK done" }
-          - { name: stubfail-control, kernel: stubfail-control, ubd0: alpine.ext4, init: /stubfail-init, marker: UMARM_BOOT_OK, timeout: "900", extra: "rw stubfail=1000", expect_bug: "start_userspace failed", expect_verdict: "HANG PANIC SIGNAL BUG" }
           # --- gate 10: loadable modules, at the three memory sizes that decide
           # which relocation path the loader takes. The module arrives through a
           # hostfs share, so hostfs_check is empty on purpose: there is no file

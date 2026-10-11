@@ -421,9 +421,25 @@ without taking it back out. The caller's failure path does not call
 -- `mm_sigchld_irq()`, on any stub dying -- reads freed memory. That is now
 `list_del`'d on the error path.
 
-Unlike every other fix in this file, that one has **no reproducing control**: it
-needs `start_userspace()` to fail, which cannot be forced without fault
-injection, and it is not something that can be triggered on demand. It is a
-provable omission from an error path -- the success path's `destroy_context()`
-does the same `list_del` -- and it is weaker evidence than a control that
-reproduces, so it is written down as such rather than counted as verified.
+### The control was built, and it does not reproduce
+
+`config/inject-stub-fail.patch` forces `start_userspace()` to fail on its N-th
+call (`stubfail=N` on the command line), which is the only way to reach the error
+path on demand. With it, the gate works: the injection fires exactly once
+(`STUBFORK done iters=2000 fails=1`), the workload completes, and the guest
+survives and reaches its marker. That is a real gain -- this error path had never
+been executed in CI -- but it is a *reachability* test, not a control.
+
+Because with the fix reverted (`config/control-mm-list.patch`) the guest survives
+too, identically: `CONTROL_FAIL`, no panic, no oops, no hang. The theory that the
+freed mm would be reused and fold `mm_list` into a cycle was wrong, and the
+revert produces no observable failure under 4000 fork+reap iterations. So the
+`list_del` remains a fix with no reproducing control, and the honest statement is
+narrower than the one that was here before: the success path's `destroy_context()`
+does the same `list_del`, so leaving it out of the error path is provably an
+omission -- and nothing in this tree demonstrates what it costs.
+
+Sharpening it is a real piece of work, not a tweak: the entry has to be walked
+while the memory behind it is in a state that matters, which means controlling
+reuse rather than just volume. Until then the row stays as what it is, and this
+file says so.
