@@ -355,10 +355,23 @@ all *looked* fine.
    distinguish a fix from a workload that never reached the code, which is the
    failure mode this whole item was: "Nothing observable fails, which is exactly
    why it will not find itself."
-1. ~~Re-run the flake loop~~ **running/done on the Pi** against `linux-default`
-   (16 KB, real hardware). Note it will now be a *weaker* statement than it
-   looks: the loop's pass criterion is the marker, and the marker did not catch
-   the rss leak. Re-read a sample of its logs for `kernel_bugs`.
+1. ~~Re-run the flake loop~~ **done, in CI, against a kernel that has loaded a
+   module.** `flake` runs on a schedule and on demand (`workflow_dispatch` takes
+   `n`), and it answers the warning in this file directly rather than looking
+   like it does: `harness/guest/flake-init` loads a module and *then* does the
+   fork/exec, the FP torture, the file mapping and the hostfs write in the same
+   boot, because a module loaded in one UML process is gone when that process
+   exits and a matrix that merely sits next to a module gate reports green either
+   way. The loop refuses to run at all when it finds no `.ko`, since an empty set
+   would be a green loop that tested nothing.
+
+   The criterion is also no longer the marker: `native.sh` scans for kernel
+   diagnostics independently and reports `verdict=BUG`, which is the difference
+   between this and the `550/550` above -- a run that printed its marker was
+   never scanned, and that is how the rss leak rode along inside a green gate.
+   Passing runs are deleted (the verdict stays in `results.tsv`) because
+   `native.sh` copies the kernel into each run directory, and two hundred of
+   those would be an eighteen-gigabyte artifact nobody can download.
 2. **Run the full gate set on the 16 KB default build.** Mostly done on the Pi
    (gates 2,3,4,5,7,11, fp, regsurvive, bitcmp). Still never run at 16 KB:
    **gate 9** and **KUnit**.
