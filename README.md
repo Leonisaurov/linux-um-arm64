@@ -58,11 +58,17 @@ Not working, or not finished:
 - **`wlan0` association is untested.** The radio comes up, the firmware loads and
   scanning returns real APs with signal levels. Associating needs credentials
   that were not available; nothing beyond scan has been exercised.
-- **`BUG: Bad rss-counter state ... type:MM_FILEPAGES val:1`** used to print
-  once per exiting process. It is absent at 16 KB pages once `PTRS_PER_PTE`
-  follows `PAGE_SHIFT`, under a workload that produced it reliably before.
-  Whether the 4 KB build is also clean is untested: the mechanism fixed there
-  cannot occur at 4 KB, so if it still appears it has another cause.
+- **`BUG: Bad rss-counter state ... type:MM_FILEPAGES val:1`** is fixed, and now
+  gated at both page sizes. It printed once per exiting process at 16 KB, where
+  `PTRS_PER_PTE` was the literal `512` -- four times the 128 entries a PMD owns --
+  so `finish_fault()` accepted a 128-page folio at any `pte_off` and `set_ptes()`
+  wrote past the window that PMD owns, into slots no lookup consults and no zap
+  frees, while the rmap and the rss counters had already counted them. The
+  workload (`harness/guest/rss-init`) is shaped around that mechanism: large
+  folios on ext4, faulted in through a file mapping, one mm freed per child. It
+  runs at 16 KB and at 4 KB (`rss-16k`, `rss-4k`), and `rss-control` -- the same
+  kernel built with the literal back -- is *required* to reproduce the BUG, so a
+  clean log cannot be mistaken for a workload that never reached the code.
 - **No cpuset controller.** `CONFIG_CPUSETS` depends on `SMP` and UML is
   uniprocessor. `docker info` warns and runs; there is nothing to pin to.
 - Guest vDSO time (`clock_gettime` without a host syscall) is written but not

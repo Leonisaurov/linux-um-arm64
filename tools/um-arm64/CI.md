@@ -29,7 +29,7 @@ share removed.
 
 | job | runner | what it does |
 | --- | --- | --- |
-| `build` | `ubuntu-24.04-arm` | `ci-build.sh` builds `ARCH=um SUBARCH=arm64 LLVM=1` twice -- `arm64_defconfig`, and the same tree with `config/docker.config` merged -- and emits both kernels, the freestanding `stub_exe`, the exact `.config`s, the Alpine root filesystem, and the gate-2 fixture |
+| `build` | `ubuntu-24.04-arm` | `ci-build.sh` builds `ARCH=um SUBARCH=arm64 LLVM=1` four times -- `arm64_defconfig`; the same tree with `config/docker.config` merged; the same tree at `PAGE_SIZE=4k`; and the same tree with `config/control-ptrs-per-pte.patch` applied, which is the negative control for the rss gate -- and emits each kernel, the freestanding `stub_exe`, the exact `.config`s, the Alpine root filesystem, and the gate-2 fixture |
 | `net-helpers` | `ubuntu-24.04-arm` | builds `umnet` and gates it with `ci-umnet.sh`: no kernel, no passt and no root needed |
 | `android` | `ubuntu-24.04-arm` | builds the kernel against the **Android NDK** for bionic, at 16 KB and 4 KB, and publishes `um-arm64-android` -- the artifact to download and run on a phone |
 | `boot` (matrix) | `ubuntu-24.04-arm` | downloads the artifact and runs `native.sh` for each gate, booting whichever kernel that gate names |
@@ -62,6 +62,9 @@ installed on Termux and is an avoidable moving part.
 | `g5-hostfs` | Alpine ext4 on `ubd0` | `rw` + `hostfs=<dir>` | the host filesystem bridge, verified from the host side |
 | `g7-debian` | Debian ext4 on `ubd0` | `rw` | a real gcc and glibc in the guest, with the program's output checked |
 | `docker-prereqs` | Debian ext4 on `ubd0` | `rw` (kernel built with `docker.config`) | cgroup v2, overlayfs, namespaces, veth/bridge, nftables |
+| `rss-16k` | Debian ext4 on `ubd0` | `rw` | the rss counters at 16 KB pages: large folios on ext4, faulted in through a file mapping, one mm freed per child |
+| `rss-4k` | Debian ext4 on `ubd0` | `rw` (kernel built at `PAGE_SIZE=4k`) | the same workload at 4 KB pages, which the port's own notes leave untested. Skipped with a reason on a host whose pages are larger, because a 4 KB guest cannot boot there |
+| `rss-control` | Debian ext4 on `ubd0` | `rw` (kernel built with the literal `PTRS_PER_PTE`) | the negative control: it must *reproduce* `Bad rss-counter`, and a control that does not is reported as a failure of the control |
 
 The `g2` fixture is `harness/probe/guestinit.c` as `/init`: a freestanding
 aarch64 binary with its own `_start`, raw `svc #0` calls, one guest capability
@@ -168,6 +171,48 @@ and recorded that "docker starts and runs". Docker started, containers did not,
 because runc calls `bpf_prog_query(BPF_CGROUP_DEVICE)` on every create. This gate
 would have caught that without running dockerd.
 
+The `rss-*` fixtures are `harness/guest/rss-init`, and the reason there are three
+of them is the whole point of the exercise. `check_mm()` runs unconditionally
+from `__mmdrop()`, so an mm freed with file-backed pages still accounted to it
+prints `BUG: Bad rss-counter state ... type:MM_FILEPAGES val:N` -- and nothing
+fails when it does. The counters are simply wrong, and they are the counters the
+OOM killer and `/proc/*/status` read, which is why this needed a gate rather
+than a reader.
+
+The defect is one line: `PTRS_PER_PTE` was the literal `512`, which at 16 KB
+pages is four times the 128 entries a PMD owns. The only bound `finish_fault()`
+puts on mapping a large folio in a single `set_ptes()` is
+`pte_off + (nr_pages - idx) > PTRS_PER_PTE`, so with the literal a 128-page folio
+is accepted at any `pte_off` and the run reaches past index 127 -- which the
+page-table walk masks away with `(PTRS_PER_PTE - 1)`, so no lookup consults
+those entries and no zap frees them, while the rmap and the rss counters have
+already counted them.
+
+So the workload is shaped around that mechanism, not around "run a shell":
+large folios (a multi-MB file read sequentially on **ext4** -- small files never
+get them and tmpfs is a different path), faulted in through a **file mapping**
+(which is what makes them `MM_FILEPAGES` and what routes through
+`finish_fault()`), with one mm freed per child. A workload missing any of the
+three would pass on a broken kernel just as happily as on a fixed one.
+
+Which is exactly why `rss-control` exists. It is the same kernel built with
+`config/control-ptrs-per-pte.patch` applied -- the literal back, and the
+`static_assert` that guards the invariant removed with it, since a control that
+cannot build is not a control -- and it **must** reproduce the BUG. `native.sh`
+grew an `EXPECT_BUG` for it: the diagnostic appearing is the expected result
+there, so it does not make the verdict `BUG`, and `expect_bug_hits=N` goes into
+`result.txt` as the evidence that it fired. A control that does *not* reproduce
+fails as `CONTROL_FAIL`, loudly, because that is the one outcome that says the
+other two runs prove nothing.
+
+`rss-4k` is the half the port's own notes leave as untested (`doc/60-
+continuation.md`, item 0a: "whether the 4 KB build is also clean is untested").
+It needs a 4 KB host -- a guest page is a host `mmap()`, and a 4 KB guest on a
+larger host hangs rather than failing -- so the step measures the runner's page
+size and skips with `verdict=SKIP` and the reason when it cannot run. That is a
+statement about the host and nothing about the kernel, and it is reported as one
+rather than passed silently.
+
 The boot log names the mode, so the gate is checkable rather than assumed
 (`arch/um/os-Linux/start_up.c`):
 
@@ -184,6 +229,9 @@ fp-noaslr    noaslr_preload_active + FPTORTURE_OK
 g5-hostfs    GATE5 ok host_read='hello-from-host' blocks=256
 g7-debian    GATE7 ok gcc=12 GATE7_C_OK threads=4 counter=40000
 docker-prereqs  GATEDOCKER ok symbols=... controllers=...
+rss-16k      GATERSS ok RSS_PARENT pages=2048 RSS_TOUCHED pages=2048 children=8 rounds=4
+rss-4k       GATERSS ok RSS_PARENT pages=2048 RSS_TOUCHED pages=2048 children=8 rounds=4
+rss-control  GATERSS ok ... + BUG: Bad rss-counter state ... type:MM_FILEPAGES val:1  (expected)
 ```
 
 ### The Android artifact
@@ -424,6 +472,24 @@ Each of these was invisible to the port's original machine and immediate here:
    where a sandbox can kill the process outright and there is no shell to ask,
    that is the difference between a diagnosis and a guess. The gate covers that
    too: `kernel-status` requires status 7 to arrive as 7.
+
+6. **`[ "" -gt 4096 ]` under `set -e`, in the 4 KB gate's host-page check.**
+   The check asks `getconf PAGESIZE` and compares. Termux has no `getconf`, so
+   the answer is the empty string, `[` prints `integer expected` and returns
+   non-zero, and `set -e` turns that into a failed step. The gate would have
+   failed for a reason with nothing to do with the kernel, on the one host class
+   the harness is most used on. It now falls back to `python3 -c
+   'os.sysconf("SC_PAGE_SIZE")'` -- the same way `verify-artifact.sh` already
+   did it -- and treats an undeterminable page size as an error with a message
+   rather than as a guess.
+
+7. **The step summary read a path `native.sh` never writes.** It looked for
+   `$RUNNER_TEMP/run/<gate>/result.txt`, and `native.sh` writes
+   `<gate>/<stamp>/result.txt` plus a `<gate>-latest` symlink next to it. So
+   every gate's summary said `no result.txt` -- the one place a human looks,
+   empty, on every run. Both the `result.txt` and the `kernel-bugs.txt` half had
+   it. Worth recording because it survived several green runs: a summary that
+   says "no result.txt" looks like a run with nothing to report.
 
 ## Running the same gates locally
 

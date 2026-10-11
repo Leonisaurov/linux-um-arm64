@@ -1,0 +1,44 @@
+Control for the rss gate: put the literal PTRS_PER_PTE back.
+
+This is the defect the rss gate is about, and building it is the only way to know
+the gate's clean run means anything. The gate's workload -- large folios on ext4,
+faulted in through a file mapping, one mm freed per child -- is built around the
+mechanism, and a workload that does not reach the mechanism passes on a broken
+kernel just as happily as on a fixed one. So the boot job builds this control and
+*requires* "Bad rss-counter" in its log; a control that does not reproduce is
+reported as a failure of the control, not quietly as a pass.
+
+At 16 KB pages a PMD covers 128 entries, and 512 is four times that. The only
+bound finish_fault() puts on mapping a large folio in a single set_ptes() is
+
+    pte_off + (nr_pages - idx) > PTRS_PER_PTE   ->   fall back to one page
+
+so with the literal a 128-page folio is accepted at any pte_off and the run
+reaches past index 127 -- which the page-table walk masks away with
+(PTRS_PER_PTE - 1), so no lookup consults those entries and no zap frees them,
+while the rmap and the rss counters have already counted them.
+
+The static_assert goes with it because it is exactly the invariant being broken,
+and a control that cannot build is not a control.
+
+Apply with:  git apply tools/um-arm64/config/control-ptrs-per-pte.patch
+diff --git a/arch/um/include/asm/pgtable-4level.h b/arch/um/include/asm/pgtable-4level.h
+index ae109ff90..056605e85 100644
+--- a/arch/um/include/asm/pgtable-4level.h
++++ b/arch/um/include/asm/pgtable-4level.h
+@@ -58,14 +58,11 @@
+  * The upper three levels stay literal because their invariants already hold at
+  * both page sizes: 512 * PMD_SIZE == PUD_SIZE and so on up.
+  */
+-#define PTRS_PER_PTE (1UL << (PMD_SHIFT - PAGE_SHIFT))
++#define PTRS_PER_PTE 512
+ #define PTRS_PER_PMD 512
+ #define PTRS_PER_PUD 512
+ #define PTRS_PER_PGD 512
+ 
+-/* The invariant the literal used to break. */
+-static_assert(PTRS_PER_PTE == (PMD_SIZE >> PAGE_SHIFT));
+-
+ #define USER_PTRS_PER_PGD ((TASK_SIZE + (PGDIR_SIZE - 1)) / PGDIR_SIZE)
+ 
+ #define pte_ERROR(e) \

@@ -338,14 +338,23 @@ all *looked* fine.
 
 0. ~~Re-run gate 6~~ **done**: PASS on `9a06116d` (the 16 KB default), tree
    `349ae7a70`, Debian to a bash login shell. It also turned up the item below.
-0a. **Root-cause the 16 KB rss leak.** `BUG: Bad rss-counter state ...
-   MM_FILEPAGES val:1`, one page per affected mm, in the shipping default.
-   Isolated to {16 KB pages} x {glibc userspace} by a controlled pair -- gate 11,
-   same cmdline, same image, same code, 4 KB clean and 16 KB leaking six times.
-   Suspect is the vDSO at `task_size - PAGE_SIZE`; the mechanism is *not*
-   established. Needs `CONFIG_DEBUG_VM` and a map/touch/exit probe. Nothing
-   observable fails, which is exactly why it will not find itself.
-   See doc/20-status.md, "An rss leak in the 16 KB default".
+0a. ~~Root-cause the 16 KB rss leak~~ **done, and gated.** The mechanism is
+   `PTRS_PER_PTE` as the literal 512: at 16 KB a PMD owns 128 entries, and the
+   only bound `finish_fault()` puts on mapping a large folio in one `set_ptes()`
+   is `pte_off + (nr_pages - idx) > PTRS_PER_PTE`, so a 128-page folio was
+   accepted at any `pte_off` and the run reached past index 127 -- masked away by
+   the page-table walk, so no lookup consults those entries and no zap frees
+   them, while the rmap and the rss counters had already counted them. The vDSO
+   was the prime suspect and was not the cause.
+
+   It is now `harness/guest/rss-init` on the Debian image: large folios on ext4,
+   faulted in through a file mapping, one mm freed per child. `rss-16k` and
+   `rss-4k` require a clean log at both page sizes, and `rss-control` -- the same
+   kernel built with `config/control-ptrs-per-pte.patch` applied -- is required
+   to *reproduce* the BUG. Without that control the two clean runs would not
+   distinguish a fix from a workload that never reached the code, which is the
+   failure mode this whole item was: "Nothing observable fails, which is exactly
+   why it will not find itself."
 1. ~~Re-run the flake loop~~ **running/done on the Pi** against `linux-default`
    (16 KB, real hardware). Note it will now be a *weaker* statement than it
    looks: the loop's pass criterion is the marker, and the marker did not catch

@@ -1,0 +1,217 @@
+#!/bin/sh
+# Gate: the rss counters balance when an mm is freed.
+#
+# check_mm() runs unconditionally from __mmdrop(), so an mm freed with
+# file-backed pages still accounted to it prints
+#
+#   BUG: Bad rss-counter state mm:... type:MM_FILEPAGES val:N Comm:... Pid:...
+#
+# and the harness scans for that independently of the marker. This init exists
+# because the defect that produced it -- PTRS_PER_PTE as the literal 512, four
+# times the 128 entries a PMD owns at 16 KB pages -- is invisible to every other
+# gate. Nothing fails, the counters are just wrong, and they are the counters the
+# OOM killer and /proc/*/status read.
+#
+# The mechanism, so that a clean log means something. finish_fault() maps a large
+# folio with a single set_ptes() covering folio_nr_pages(), and its only bound is
+# PTRS_PER_PTE:
+#
+#     pte_off + (nr_pages - idx) > PTRS_PER_PTE   ->   fall back to one page
+#
+# With the literal, a 128-page folio is accepted at any pte_off, so the run
+# reaches past index 127 -- and the page-table walk masks the index with
+# (PTRS_PER_PTE - 1), so entries above 127 are consulted by no lookup and freed
+# by no zap, while the rmap and the rss counters have already counted them.
+#
+# Three things are therefore needed, and a workload missing any one of them would
+# pass on a broken kernel:
+#
+#   1. large folios, which takes a multi-MB file read sequentially on ext4 --
+#      small files never get them and tmpfs is a different path;
+#   2. faulting them in through a file mapping, which is what makes them
+#      MM_FILEPAGES and what routes through finish_fault();
+#   3. exiting, once per mm, because check_mm() only runs on the way out.
+#
+# So this is deliberately not "run a shell and see". The CI job rss-control
+# builds the same kernel with the literal restored and *requires* the BUG to
+# appear; that control is what keeps this workload honest, because without it a
+# clean log cannot be told from a workload that never reached the code.
+#
+# Run as:  init=/rss-init ubd0=debian.ext4 root=/dev/ubda rw
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+export PATH
+
+fail() {
+	echo "GATERSS_FAIL: $*"
+	exit 1
+}
+
+mkdir -p /proc /sys /dev /tmp 2>/dev/null
+mount -t proc     proc     /proc 2>/dev/null
+mount -t sysfs    sysfs    /sys  2>/dev/null
+mount -t devtmpfs devtmpfs /dev  2>/dev/null
+mount -t tmpfs    tmpfs    /tmp  2>/dev/null
+
+[ -r /proc/self/stat ] || fail "procfs is not mounted"
+command -v gcc >/dev/null 2>&1 || fail "no gcc in the image"
+
+# The data file has to be on the ext4 image. /tmp is a tmpfs here, and tmpfs
+# takes a different path through the page cache -- the folios would be shmem,
+# never reach finish_fault() as file pages, and the workload would test nothing.
+case "$(df -T /var/tmp 2>/dev/null | awk 'NR==2 {print $2}')" in
+ext2|ext3|ext4)	;;
+*) fail "/var/tmp is not on an ext filesystem: $(df -T /var/tmp 2>/dev/null | tail -1)" ;;
+esac
+
+cat > /tmp/rss.c <<'EOF'
+#define _GNU_SOURCE
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+/* 8 MB is far more than the 2 MB a PMD covers at 16 KB pages, so the folios
+ * ext4 builds for it are large enough to straddle one. */
+#define BIG_BYTES	(8UL << 20)
+#define CHILDREN	8
+#define ROUNDS		4
+
+static const char *path = "/var/tmp/rss-big";
+
+/* Small files never get large folios, so the file has to be big, and it has to
+ * be written before it is read: readahead is what decides the folio order. */
+static void make_file(void)
+{
+	static char buf[1 << 16];
+	unsigned long left = BIG_BYTES;
+	int fd = open(path, O_CREAT | O_TRUNC | O_WRONLY, 0600);
+
+	if (fd < 0) {
+		perror("open for write");
+		exit(2);
+	}
+	memset(buf, 0x5a, sizeof(buf));
+	while (left) {
+		size_t n = left < sizeof(buf) ? left : sizeof(buf);
+
+		if (write(fd, buf, n) != (ssize_t)n) {
+			perror("write");
+			exit(2);
+		}
+		left -= n;
+	}
+	if (close(fd)) {
+		perror("close");
+		exit(2);
+	}
+}
+
+/* Read it all first, so the page cache holds the folios; then map it and touch
+ * every page, which is the fault that finish_fault() turns into a run of PTEs.
+ * The byte read back is checked against what was written, so a mapping that
+ * silently pointed somewhere else cannot pass as work done. */
+static unsigned long touch_all(void)
+{
+	static char buf[1 << 17];
+	unsigned long pages = 0;
+	char *m;
+	size_t i;
+	int fd;
+
+	fd = open(path, O_RDONLY);
+	if (fd < 0) {
+		perror("open for read");
+		exit(2);
+	}
+	readahead(fd, 0, BIG_BYTES);
+	while (read(fd, buf, sizeof(buf)) > 0)
+		;
+
+	m = mmap(NULL, BIG_BYTES, PROT_READ, MAP_PRIVATE, fd, 0);
+	if (m == MAP_FAILED) {
+		perror("mmap");
+		exit(2);
+	}
+	/* One byte per guest page. 4096 rather than the guest's page size on
+	 * purpose: at 16 KB this touches four times per page, at 4 KB once, so
+	 * the same source exercises both without asking what they are. */
+	for (i = 0; i < BIG_BYTES; i += 4096)
+		pages += (unsigned char)m[i] == 0x5a;
+	munmap(m, BIG_BYTES);
+	close(fd);
+	return pages;
+}
+
+int main(void)
+{
+	unsigned long pages;
+	int i;
+
+	make_file();
+	pages = touch_all();
+	if (!pages) {
+		printf("RSS_BAD_EMPTY\n");
+		return 1;
+	}
+	printf("RSS_PARENT pages=%lu\n", pages);
+	fflush(stdout);
+
+	/* One mm per child, freed on exit -- that is when check_mm() runs, and
+	 * the parent's own mm is freed at the end of all this. */
+	for (i = 0; i < CHILDREN; i++) {
+		pid_t p = fork();
+		int st, r;
+
+		if (p < 0) {
+			perror("fork");
+			return 2;
+		}
+		if (p == 0) {
+			unsigned long n = 0;
+
+			for (r = 0; r < ROUNDS; r++)
+				n += touch_all();
+			_exit(n ? 0 : 3);
+		}
+		if (waitpid(p, &st, 0) < 0) {
+			perror("waitpid");
+			return 2;
+		}
+		if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+			printf("RSS_BAD_CHILD status=%d\n", st);
+			return 1;
+		}
+	}
+
+	printf("RSS_TOUCHED pages=%lu children=%d rounds=%d\n",
+	       pages, CHILDREN, ROUNDS);
+	return 0;
+}
+EOF
+
+gcc -O2 -Wall -o /tmp/rss /tmp/rss.c || fail "gcc failed"
+
+# The exec path as well as the mapping path: the loader maps libc and everything
+# it pulls in, and the original sighting was a login shell rather than a
+# deliberate mmap, so both are exercised.
+for i in 1 2 3 4 5 6 7 8; do
+	/bin/true
+done
+ldd /bin/sh >/dev/null 2>&1 || fail "the dynamic loader is not working"
+
+out=$(/tmp/rss) || fail "the guest's own workload failed: $out"
+case "$out" in
+*RSS_TOUCHED*) ;;
+*) fail "no summary line: $out" ;;
+esac
+
+echo "GATERSS ok $(echo "$out" | tr '\n' ' ')"
+echo "UMARM_BOOT_OK"
+
+sync
+exec /umarm-poweroff

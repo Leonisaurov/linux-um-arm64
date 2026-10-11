@@ -90,6 +90,36 @@ jobs:
           export EXTRA_CONFIG="tools/um-arm64/config/docker.config"
           bash tools/um-arm64/harness/ci-build.sh
 
+      # The 4 KB build, which the port documents as the alternative for hosts
+      # that know their page size and nothing in CI had ever booted. It is the
+      # same tree with one Kconfig choice flipped, so it is a different kernel
+      # and not a different configuration of the same one.
+      - name: Build kernel (4 KB pages)
+        run: |
+          set -euo pipefail
+          export O="$RUNNER_TEMP/umarm-build-4k"
+          export ART="$RUNNER_TEMP/artifacts/4k"
+          export CCACHE_DIR="$RUNNER_TEMP/ccache"
+          export PAGE_SIZE=4k
+          bash tools/um-arm64/harness/ci-build.sh
+
+      # The negative control for the rss gate: the same kernel with the literal
+      # PTRS_PER_PTE back, which is the defect that gate is about. It exists
+      # because a clean log from the gate cannot be told apart from a workload
+      # that never reached the mechanism, and the boot job requires this kernel
+      # to reproduce the BUG. Applied and reverted here so every other build in
+      # this job sees a pristine tree.
+      - name: Build the control kernel (rss negative control)
+        run: |
+          set -euo pipefail
+          git apply --check tools/um-arm64/config/control-ptrs-per-pte.patch
+          git apply tools/um-arm64/config/control-ptrs-per-pte.patch
+          trap 'git checkout -- arch/um/include/asm/pgtable-4level.h' EXIT
+          export O="$RUNNER_TEMP/umarm-build-control"
+          export ART="$RUNNER_TEMP/artifacts/control"
+          export CCACHE_DIR="$RUNNER_TEMP/ccache"
+          bash tools/um-arm64/harness/ci-build.sh
+
       - name: Build Alpine root filesystem
         run: |
           set -euo pipefail
@@ -527,6 +557,28 @@ jobs:
           # is the list that config exists for, which is where the port's own
           # "docker starts and runs" claim turned out to be false.
           - { name: docker-prereqs, kernel: docker, ubd0: debian.ext4, init: /docker-init,        marker: UMARM_BOOT_OK,   timeout: "900", extra: "rw", debian: "yes" }
+          # --- the rss counters, at both page sizes, plus the negative control
+          # that gives the clean runs their meaning.
+          #
+          # check_mm() runs unconditionally from __mmdrop(), so an mm freed with
+          # file-backed pages still accounted to it says so. Nothing fails when
+          # this is wrong -- the counters are just wrong, and they are the ones
+          # the OOM killer reads -- which is why it needs a gate rather than a
+          # reader. The workload is deliberately shaped around the mechanism:
+          # large folios on ext4, faulted in through a file mapping, one mm freed
+          # per child. See harness/guest/rss-init.
+          #
+          # rss-control is the same kernel built with the literal PTRS_PER_PTE
+          # back (config/control-ptrs-per-pte.patch), and it must reproduce the
+          # BUG: a control that does not reproduce is reported as a failure of
+          # the control, because it would mean the workload never reaches the
+          # code and the other two runs prove nothing.
+          - { name: rss-16k,     kernel: default, ubd0: debian.ext4, init: /rss-init,           marker: UMARM_BOOT_OK,   timeout: "900", extra: "rw", debian: "yes" }
+          # The 4 KB half, which the port's own notes leave as untested. It can
+          # only boot on a 4 KB host, and the step skips it with a reason when
+          # the runner's pages are larger rather than hanging.
+          - { name: rss-4k,      kernel: 4k,      ubd0: debian.ext4, init: /rss-init,           marker: UMARM_BOOT_OK,   timeout: "900", extra: "rw", debian: "yes" }
+          - { name: rss-control, kernel: control, ubd0: debian.ext4, init: /rss-init,           marker: UMARM_BOOT_OK,   timeout: "900", extra: "rw", debian: "yes", expect_bug: "Bad rss-counter" }
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -559,6 +611,36 @@ jobs:
         run: |
           set -euo pipefail
           ls -la "$RUNNER_TEMP/artifacts" "$RUNNER_TEMP/artifacts/${{ matrix.kernel }}" || true
+
+          # A guest page is a host mmap(), so a 4 KB guest cannot boot on a host
+          # with larger pages: it hangs rather than failing. Skipping says
+          # something about the host and nothing about the kernel, so it is
+          # reported as a skip with the reason attached, never as a pass.
+          #
+          # getconf is not everywhere (Termux has no getconf), and an empty
+          # answer here used to fall through to [ "" -gt 4096 ], which is an
+          # error under set -e: the gate would fail for a reason that has
+          # nothing to do with the kernel. Undeterminable is an error, not a
+          # guess -- guessing wrong either hangs the boot or skips a gate that
+          # could have run.
+          HOST_PAGE=$(getconf PAGESIZE 2>/dev/null ||
+                      python3 -c 'import os; print(os.sysconf("SC_PAGE_SIZE"))' 2>/dev/null || true)
+          case "$HOST_PAGE" in
+          '' | *[!0-9]*)
+            echo "::error::cannot determine the host page size (no getconf, no python3)" >&2
+            exit 1
+            ;;
+          esac
+          echo "host page size $HOST_PAGE"
+          if [ "${{ matrix.kernel }}" = 4k ] && [ "$HOST_PAGE" -gt 4096 ]; then
+            echo "::warning::${{ matrix.name }} skipped: a 4 KB guest cannot boot on a $HOST_PAGE-page host"
+            mkdir -p "$RUNNER_TEMP/run/${{ matrix.name }}/skipped"
+            printf 'gate=%s\nverdict=SKIP\nreason=host page size %s > 4096\n' \
+              "${{ matrix.name }}" "$HOST_PAGE" \
+              > "$RUNNER_TEMP/run/${{ matrix.name }}/skipped/result.txt"
+            exit 0
+          fi
+
           export BIN="$RUNNER_TEMP/artifacts/${{ matrix.kernel }}/linux-um-arm64"
           export ART="$RUNNER_TEMP/run"
           export GATE="${{ matrix.name }}"
@@ -575,6 +657,9 @@ jobs:
           # are at the top.
           [ -z "${{ matrix.preload }}" ] || export PRELOAD="$RUNNER_TEMP/artifacts/${{ matrix.kernel }}/${{ matrix.preload }}"
           [ -z "${{ matrix.preload_marker }}" ] || export PRELOAD_MARKER="${{ matrix.preload_marker }}"
+          # Set only on the negative control, where the diagnostic appearing is
+          # the expected result rather than a defect.
+          [ -z "${{ matrix.expect_bug }}" ] || export EXPECT_BUG="${{ matrix.expect_bug }}"
           if [ "${{ matrix.hostfs }}" = yes ]; then
             export HOSTFS="$RUNNER_TEMP/hostshare"
             export HOSTFS_CHECK="renamed-guest.txt"
@@ -593,15 +678,21 @@ jobs:
       - name: Step summary
         if: always()
         run: |
+          # native.sh writes <gate>/<stamp>/result.txt and a <gate>-latest
+          # symlink next to it. Reading <gate>/result.txt found nothing, so this
+          # summary said "no result.txt" on every gate -- the one place a human
+          # looks, empty.
+          R="$RUNNER_TEMP/run/${{ matrix.name }}-latest"
+          [ -d "$R" ] || R=$(ls -dt "$RUNNER_TEMP/run/${{ matrix.name }}"/* 2>/dev/null | head -1)
           {
             echo "### ${{ matrix.name }}"
             echo '```'
-            cat "$RUNNER_TEMP/run/${{ matrix.name }}/result.txt" 2>/dev/null || echo "no result.txt"
+            cat "${R:-/nonexistent}/result.txt" 2>/dev/null || echo "no result.txt"
             echo '```'
-            if [ -s "$RUNNER_TEMP/run/${{ matrix.name }}/kernel-bugs.txt" ]; then
+            if [ -s "$R/kernel-bugs.txt" ]; then
               echo "#### kernel diagnostics"
               echo '```'
-              cat "$RUNNER_TEMP/run/${{ matrix.name }}/kernel-bugs.txt"
+              cat "$R/kernel-bugs.txt"
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"

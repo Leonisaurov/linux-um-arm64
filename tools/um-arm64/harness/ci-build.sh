@@ -13,6 +13,9 @@
 #
 #   O=/tmp/umarm-build ART=/tmp/artifacts ./ci-build.sh [make-target]
 #
+# Knobs: EXTRA_CONFIG (config fragments), PAGE_SIZE=16k|4k, KERNEL_NAME, O, ART,
+# TREE, JOBS, TARGET.
+#
 # Outputs, next to each other under $ART:
 #   linux-um-arm64   the UML kernel binary (aarch64 userspace process)
 #   stub_exe         the freestanding stub, for hosts that refuse a memfd exec
@@ -76,14 +79,48 @@ fi
 # into the defconfig before olddefconfig. The docker gate needs a kernel built
 # with tools/um-arm64/config/docker.config, and a different config is a different
 # build; merge_config.sh plus olddefconfig is the tree's own way of doing it.
+#
+# PAGE_SIZE: 16k (the port's default, see arch/um/configs/arm64_defconfig) or 4k.
+# It is a Kconfig *choice*, so it has to be set on both sides: enabling one
+# without disabling the other leaves the choice unresolved and olddefconfig
+# silently keeps whatever was there, which is a kernel that boots everywhere
+# except the host class it was built for.
+CONFIG_TOUCHED=0
+
+case "${PAGE_SIZE:-16k}" in
+16k) PAGESYM=PAGE_SIZE_16KB; NOTSYM=PAGE_SIZE_4KB ;;
+4k)  PAGESYM=PAGE_SIZE_4KB;  NOTSYM=PAGE_SIZE_16KB ;;
+*)   echo "ci-build.sh: PAGE_SIZE must be 16k or 4k, not '$PAGE_SIZE'" >&2; exit 2 ;;
+esac
+
+if [ "$PAGESYM" != PAGE_SIZE_16KB ]; then
+    echo "### page size $PAGE_SIZE"
+    "$TREE"/scripts/config --file "$O/.config" -d "$NOTSYM" -e "$PAGESYM"
+    CONFIG_TOUCHED=1
+fi
+
 if [ -n "${EXTRA_CONFIG:-}" ]; then
     for frag in $EXTRA_CONFIG; do
         [ -f "$TREE/$frag" ] || { echo "ci-build.sh: no config fragment $TREE/$frag" >&2; exit 2; }
     done
     echo "### merge $EXTRA_CONFIG"
     ( cd "$TREE" && scripts/kconfig/merge_config.sh -m -O "$O" "$O/.config" $EXTRA_CONFIG ) || exit 1
+    CONFIG_TOUCHED=1
+fi
+
+# merge_config.sh only merges and scripts/config only edits: nothing is resolved
+# until olddefconfig, which is why it runs once, here, for all of the above --
+# and why the assertion below is about the *resolved* config rather than about
+# what was asked for.
+if [ "$CONFIG_TOUCHED" = 1 ]; then
     "${MAKE[@]}" olddefconfig || exit 1
 fi
+
+grep -q "^CONFIG_${PAGESYM}=y" "$O/.config" || {
+    echo "ci-build.sh: CONFIG_${PAGESYM} is not set in $O/.config after olddefconfig" >&2
+    exit 1
+}
+
 
 # Name the artifact after the config so a run cannot be misread as the other
 # kernel: the default and the docker build produce the same file name.
@@ -119,6 +156,7 @@ echo "### preload $ART/noaslr_preload.so ($(stat -c %s "$ART/noaslr_preload.so")
     echo "head=$(git -C "$TREE" rev-parse HEAD 2>/dev/null || echo unknown)"
     echo "clang=$(clang --version | head -1)"
     echo "extra_config=${EXTRA_CONFIG:-none}"
+    echo "page_size=${PAGE_SIZE:-16k} ($PAGESYM=y)"
     echo "size_linux=$(stat -c %s "$ART/$KERNEL_NAME")"
     echo "sha256_linux=$(sha256sum "$ART/$KERNEL_NAME" | cut -d' ' -f1)"
     echo "size_stub=$(stat -c %s "$ART/stub_exe")"

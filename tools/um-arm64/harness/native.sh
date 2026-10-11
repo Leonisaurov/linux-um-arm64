@@ -174,13 +174,36 @@ if [ -n "$PRELOAD" ] && [ -n "$PRELOAD_MARKER" ]; then
     grep -qF "$PRELOAD_MARKER" "$OUT/boot.log" 2>/dev/null || PRELOAD_MISSING=1
 fi
 
+# A run configured with EXPECT_BUG is a negative control: the same workload on a
+# kernel deliberately built with the defect, where the defect appearing is the
+# expected result. It exists because "the bug is gone" and "the workload never
+# reached the code" look identical from here, and only a control separates them.
+# So a control that does *not* reproduce fails, loudly, as a failure of the
+# control -- passing quietly would be the one outcome that teaches nothing.
+EXPECT_HITS=0
+if [ -n "$EXPECT_BUG" ]; then
+    # Counted only when a control is configured: grep -F with an empty pattern
+    # matches every line, so an unguarded count would report the log's length as
+    # hits on every ordinary gate.
+    EXPECT_HITS=$(grep -acF "$EXPECT_BUG" "$OUT/boot.log" 2>/dev/null || true)
+    EXPECT_HITS=${EXPECT_HITS:-0}
+fi
+EXPECT_MISSING=0
+if [ -n "$EXPECT_BUG" ] && [ "$EXPECT_HITS" = 0 ]; then
+    EXPECT_MISSING=1
+fi
+
 # --- verdict ----------------------------------------------------------------
 if [ "$PRELOAD_MISSING" = 1 ]; then
     VERDICT=PRELOAD_FAIL
 elif [ "$HOSTFS_MISSING" != 0 ]; then
     VERDICT=HOSTFS_FAIL
+elif [ "$EXPECT_MISSING" = 1 ]; then
+    VERDICT=CONTROL_FAIL
 elif grep -qF "$MARKER" "$OUT/boot.log" 2>/dev/null; then
-    if [ "$KBUGS" -gt 0 ]; then VERDICT=BUG; else VERDICT=PASS; fi
+    # On a control the diagnostic *is* the expectation, so it does not make the
+    # verdict BUG; expect_bug_hits in result.txt is the evidence that it fired.
+    if [ -n "$EXPECT_BUG" ] || [ "$KBUGS" -eq 0 ]; then VERDICT=PASS; else VERDICT=BUG; fi
 elif [ "$GUESTFAIL" -gt 0 ]; then
     VERDICT=GUEST_FAIL
 elif [ "$RC" = "137" ] || [ "$RC" = "124" ]; then
@@ -223,6 +246,8 @@ esac
     echo "hostfs=${HOSTFS:-none}"
     echo "hostfs_check=${HOSTFS_CHECK:-none}"
     echo "hostfs_missing=$HOSTFS_MISSING"
+    echo "expect_bug=${EXPECT_BUG:-none}"
+    echo "expect_bug_hits=$EXPECT_HITS"
     echo "boot_log_lines=$(wc -l < "$OUT/boot.log" 2>/dev/null || echo 0)"
     echo "kernel_bugs=$KBUGS"
     echo "guest_fail=$GUESTFAIL"
