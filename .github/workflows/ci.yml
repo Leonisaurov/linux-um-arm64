@@ -798,7 +798,7 @@ jobs:
           # must *disagree*, which is what makes a green clock-guest mean
           # something. Neither number had ever been measured on either side.
           - { name: clock-guest,   kernel: default,       ubd0: alpine.ext4, init: /clock-init, marker: UMARM_BOOT_OK, timeout: "900", extra: "rw", hostfs: "yes", hostfs_check: "", clock_slack: "20" }
-          - { name: clock-control, kernel: control-clock, ubd0: alpine.ext4, init: /clock-init, marker: UMARM_BOOT_OK, timeout: "900", extra: "rw", hostfs: "yes", hostfs_check: "", clock_slack: "20" }
+          - { name: clock-control, kernel: control-clock, ubd0: alpine.ext4, init: /clock-init, marker: UMARM_BOOT_OK, timeout: "900", extra: "rw", hostfs: "yes", hostfs_check: "", clock_slack: "20", expect_verdict: "CLOCK_FAIL" }
           # --- gate 10: loadable modules, at the three memory sizes that decide
           # which relocation path the loader takes. The module arrives through a
           # hostfs share, so hostfs_check is empty on purpose: there is no file
@@ -897,6 +897,7 @@ jobs:
           # the expected result rather than a defect.
           [ -z "${{ matrix.expect_bug }}" ] || export EXPECT_BUG="${{ matrix.expect_bug }}"
           [ -z "${{ matrix.clock_slack }}" ] || export CLOCK_SLACK="${{ matrix.clock_slack }}"
+          [ -z "${{ matrix.expect_verdict }}" ] || export EXPECT_VERDICT="${{ matrix.expect_verdict }}"
           if [ "${{ matrix.hostfs }}" = yes ]; then
             export HOSTFS="$RUNNER_TEMP/hostshare"
             export HOSTFS_CHECK="${{ matrix.hostfs_check }}"

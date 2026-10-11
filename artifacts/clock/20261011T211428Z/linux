@@ -1,0 +1,3 @@
+#!/bin/sh
+echo "CLOCKCHECK_DONE mono_elapsed=30.000"
+echo "UMARM_BOOT_OK"

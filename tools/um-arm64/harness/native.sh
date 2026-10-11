@@ -45,6 +45,11 @@ PRELOAD_MARKER=${PRELOAD_MARKER:-}
 # The local test that missed this passed EXPECT_BUG="" for the ordinary cases,
 # and defined-but-empty is not the same thing as unset.
 EXPECT_BUG=${EXPECT_BUG:-}
+# The other kind of negative control. rss-control expects a diagnostic in the
+# kernel log; clock-control's signal is a verdict, because a wrong clock rate is
+# not something the kernel prints. Same idea, different observable: the gate is
+# required to reach this verdict, and failing to reach it is the failure.
+EXPECT_VERDICT=${EXPECT_VERDICT:-}
 # REQUIRE is a space-separated list of strings that must appear in the log, for
 # markers a guest cannot check for itself. fptorture is the case that made it
 # necessary: it opens /dev/console and writes there through a descriptor of its
@@ -263,6 +268,18 @@ else
     VERDICT=FAIL
 fi
 
+# --- the negative control, in verdict form ----------------------------------
+# Before the marker, and after everything the verdict is made of.
+EXPECT_VERDICT_HIT=""
+if [ -n "$EXPECT_VERDICT" ]; then
+    if [ "$VERDICT" = "$EXPECT_VERDICT" ]; then
+        EXPECT_VERDICT_HIT=$VERDICT
+        VERDICT=PASS
+    else
+        VERDICT=CONTROL_FAIL
+    fi
+fi
+
 # --- on a fatal signal, get a real backtrace --------------------------------
 # 132=SIGILL 133=SIGTRAP 134=SIGABRT 135=SIGBUS 136=SIGFPE 139=SIGSEGV
 case "$RC" in
@@ -297,6 +314,8 @@ esac
     echo "hostfs_missing=$HOSTFS_MISSING"
     echo "expect_bug=${EXPECT_BUG:-none}"
     echo "expect_bug_hits=$EXPECT_HITS"
+    echo "expect_verdict=${EXPECT_VERDICT:-none}"
+    echo "expect_verdict_hit=${EXPECT_VERDICT_HIT:-none}"
     echo "require=${REQUIRE:-none}"
     echo "require_missing=${REQUIRE_MISSING:-none}"
     echo "clock_slack=${CLOCK_SLACK:-none}"
