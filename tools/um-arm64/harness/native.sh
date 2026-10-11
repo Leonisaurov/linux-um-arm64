@@ -277,12 +277,16 @@ fi
 # Before the marker, and after everything the verdict is made of.
 EXPECT_VERDICT_HIT=""
 if [ -n "$EXPECT_VERDICT" ]; then
-    if [ "$VERDICT" = "$EXPECT_VERDICT" ]; then
-        EXPECT_VERDICT_HIT=$VERDICT
-        VERDICT=PASS
-    else
-        VERDICT=CONTROL_FAIL
-    fi
+    # A list, because a control can fail in more than one way and pinning one
+    # verdict would turn "it reproduced differently" into "it did not
+    # reproduce" -- which is a different claim, and a wrong one.
+    for want in $EXPECT_VERDICT; do
+        if [ "$VERDICT" = "$want" ]; then
+            EXPECT_VERDICT_HIT=$VERDICT
+            VERDICT=PASS
+        fi
+    done
+    [ -n "$EXPECT_VERDICT_HIT" ] || VERDICT=CONTROL_FAIL
 fi
 
 # --- on a fatal signal, get a real backtrace --------------------------------

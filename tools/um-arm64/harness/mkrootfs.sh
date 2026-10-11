@@ -148,6 +148,9 @@ compile_probe "$HERE/probe/fptorture.c" fptorture
 # Freestanding like the rest, because that is the only thing this path can build
 # -- clockcheck.c wants printf and cannot be linked here at all.
 compile_probe "$HERE/probe/clockprobe.c" clockprobe
+# The fork+reap volume for the fault-injection gate, from a binary: a shell
+# cannot survive its own fork failing. See harness/probe/stubfork.c.
+compile_probe "$HERE/probe/stubfork.c" stubfork
 
 # e2fsprogs refuses to overwrite an existing filesystem unless forced, and CI
 # reuses $OUT across attempts. The Debian tree carries device nodes and root

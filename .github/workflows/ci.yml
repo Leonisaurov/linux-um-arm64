@@ -842,8 +842,8 @@ jobs:
           # walk loops. The fixed row requires the injection diagnostic; the
           # control expects that same diagnostic plus the hang verdict, so a
           # control that does not reproduce is a failure of the control.
-          - { name: stubfail,         kernel: stubfail,         ubd0: alpine.ext4, init: /stubfail-init, marker: UMARM_BOOT_OK, timeout: "900", extra: "rw stubfail=1000", require: "start_userspace failed" }
-          - { name: stubfail-control, kernel: stubfail-control, ubd0: alpine.ext4, init: /stubfail-init, marker: UMARM_BOOT_OK, timeout: "900", extra: "rw stubfail=1000", expect_bug: "start_userspace failed", expect_verdict: "HANG" }
+          - { name: stubfail,         kernel: stubfail,         ubd0: alpine.ext4, init: /stubfail-init, marker: UMARM_BOOT_OK, timeout: "900", extra: "rw stubfail=1000", require: "start_userspace failed STUBFORK done" }
+          - { name: stubfail-control, kernel: stubfail-control, ubd0: alpine.ext4, init: /stubfail-init, marker: UMARM_BOOT_OK, timeout: "900", extra: "rw stubfail=1000", expect_bug: "start_userspace failed", expect_verdict: "HANG PANIC SIGNAL BUG" }
           # --- gate 10: loadable modules, at the three memory sizes that decide
           # which relocation path the loader takes. The module arrives through a
           # hostfs share, so hostfs_check is empty on purpose: there is no file

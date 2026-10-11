@@ -34,26 +34,16 @@ mount -t tmpfs    tmpfs    /tmp  2>/dev/null
 [ -r /proc/self/stat ] || fail "procfs is not mounted"
 [ -d /sys/kernel ]     || fail "sysfs is not mounted"
 
-# Volume of fork+exec, each a fresh mm and so a start_userspace() call. Exactly
-# one of them fails; the failing fork returns non-zero, which is normal and
-# must not abort init. The calls that follow are what reuse the freed mm. 2000
-# is the volume gate 4 already uses, so the count is not exotic.
-i=0
-while [ "$i" -lt 2000 ]; do
-	/bin/true 2>/dev/null || :
-	i=$((i + 1))
-done
+# Volume of fork+reap, from a binary. It cannot be a shell loop: busybox ash
+# aborts when its own fork fails, and `|| :` does not help because the shell
+# dies inside itself rather than reporting a status. The first version of this
+# gate was a shell loop and the gate and its control both died the same way --
+# testing nothing. Exactly one clone fails (stubfail=N on the command line); the
+# probe counts it and keeps going. The second pass is what walks mm_list after
+# the freed mm was left linked: mm_sigchld_irq() is the walk that reads it.
+/stubfork || fail "stubfork failed"
+/stubfork || fail "stubfork (second pass) failed"
 
-# Several stubs alive and dying at once, so SIGCHLD walks overlap. The walk is
-# what dereferences the freed mm in the broken kernel.
-i=0
-while [ "$i" -lt 32 ]; do
-	( /bin/true ) &
-	i=$((i + 1))
-done
-wait 2>/dev/null
-
-echo "STUBFAIL ok forks=2000"
 echo "UMARM_BOOT_OK"
 
 # Power off rather than let init exit: init exiting is a panic under panic=-1,
