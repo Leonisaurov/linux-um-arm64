@@ -38,7 +38,12 @@ mkdir -p "$OUT" "$HOSTFS"
 TSV="$OUT/results.tsv"
 printf 'iter\tgate\tverdict\trc\tseconds\tartifact\n' > "$TSV"
 
-# name | marker | init | ubd0 | initrd | mem | hostfs | every | timeout
+# name | marker | require | init | ubd0 | initrd | mem | hostfs | every | timeout
+#
+# "require" is for markers the guest cannot check itself, which the harness then
+# looks for in the boot log: flake-init runs fptorture, whose output goes to
+# /dev/console through a descriptor it opens itself and is therefore nowhere the
+# guest can read.
 #
 # The marker is per row and not one string for the whole loop: the fixtures
 # announce themselves differently (the freestanding guestinit prints
@@ -53,12 +58,12 @@ printf 'iter\tgate\tverdict\trc\tseconds\tartifact\n' > "$TSV"
 # and teardown flakes live -- run every time, and flake-init runs every time
 # because it is the perturbation and a sampled perturbation is not one.
 MATRIX=(
-"g2mini|UMARM_GUEST_OK|/init||initramfs.cpiogz|512M||1|180"
-"g3|UMARM_BOOT_OK|/gate3-init|alpine.ext4||512M||1|300"
-"flake|UMARM_BOOT_OK|/flake-init|alpine.ext4||512M|yes|1|300"
-"g4|UMARM_BOOT_OK|/gate4-init|alpine.ext4||512M||5|900"
-"fp|FPTORTURE_OK|/fp-init|alpine.ext4||512M||5|900"
-"rss|UMARM_BOOT_OK|/rss-init|debian.ext4||512M||5|900"
+"g2mini|UMARM_GUEST_OK||/init||initramfs.cpiogz|512M||1|180"
+"g3|UMARM_BOOT_OK||/gate3-init|alpine.ext4||512M||1|300"
+"flake|UMARM_BOOT_OK|FPTORTURE_OK|/flake-init|alpine.ext4||512M|yes|1|300"
+"g4|UMARM_BOOT_OK||/gate4-init|alpine.ext4||512M||5|900"
+"fp|FPTORTURE_OK||/fp-init|alpine.ext4||512M||5|900"
+"rss|UMARM_BOOT_OK||/rss-init|debian.ext4||512M||5|900"
 )
 
 BIN="$KERNEL/linux-um-arm64"
@@ -79,7 +84,7 @@ declare -A firstfail
 start=$SECONDS
 for i in $(seq 1 "$N"); do
     for row in "${MATRIX[@]}"; do
-        IFS='|' read -r name marker init ubd0 initrd mem hf every tmo <<< "$row"
+        IFS='|' read -r name marker require init ubd0 initrd mem hf every tmo <<< "$row"
         [ $(( i % ${every:-1} )) -eq 0 ] || continue
         t0=$SECONDS
 
@@ -89,6 +94,7 @@ for i in $(seq 1 "$N"); do
             ART="$OUT/run"
             TIMEOUT="$tmo"
             MARKER="$marker"
+            REQUIRE="$require"
             INIT="$init"
             MEM="$mem"
             EXTRA_ARGS="rw"
@@ -114,6 +120,16 @@ for i in $(seq 1 "$N"); do
         runs[$name]=$(( ${runs[$name]:-0} + 1 ))
         if [ "$verdict" = PASS ]; then
             pass[$name]=$(( ${pass[$name]:-0} + 1 ))
+            # A passing run's directory is deleted. native.sh copies the kernel
+            # into it, so eighteen runs was 1.6 GB and the two hundred of a
+            # scheduled run would be eighteen gigabytes -- an artifact nobody can
+            # download is not evidence. results.tsv keeps the verdict, and the
+            # failures keep everything they produced.
+            # native.sh writes $ART/$GATE/$STAMP and a $GATE-latest symlink
+            # beside it, so the directory to remove is the one named after this
+            # iteration -- no readlink, which returned nothing inside the script
+            # and left every run in place while the symlinks went.
+            rm -rf "$OUT/run/flake-$name-$i" "$latest"
         else
             fail[$name]=$(( ${fail[$name]:-0} + 1 ))
             [ -n "${firstfail[$name]:-}" ] || firstfail[$name]="$latest"

@@ -45,6 +45,12 @@ PRELOAD_MARKER=${PRELOAD_MARKER:-}
 # The local test that missed this passed EXPECT_BUG="" for the ordinary cases,
 # and defined-but-empty is not the same thing as unset.
 EXPECT_BUG=${EXPECT_BUG:-}
+# REQUIRE is a space-separated list of strings that must appear in the log, for
+# markers a guest cannot check for itself. fptorture is the case that made it
+# necessary: it opens /dev/console and writes there through a descriptor of its
+# own, so no redirection inside the guest captures it, and the boot log -- this
+# side of the boundary -- is the only place that output exists.
+REQUIRE=${REQUIRE:-}
 # HOSTFS is a directory on this machine that the guest will mount through UML's
 # hostfs. The path travels in the kernel command line, not inside the guest
 # image: an image that carries its own host path stops working the moment it
@@ -199,11 +205,20 @@ if [ -n "$EXPECT_BUG" ] && [ "$EXPECT_HITS" = 0 ]; then
     EXPECT_MISSING=1
 fi
 
+# Checked before the marker, like the others: a run that did not do what it
+# claims must not be able to pass at all.
+REQUIRE_MISSING=""
+for want in $REQUIRE; do
+    grep -qF "$want" "$OUT/boot.log" 2>/dev/null || REQUIRE_MISSING="$REQUIRE_MISSING $want"
+done
+
 # --- verdict ----------------------------------------------------------------
 if [ "$PRELOAD_MISSING" = 1 ]; then
     VERDICT=PRELOAD_FAIL
 elif [ "$HOSTFS_MISSING" != 0 ]; then
     VERDICT=HOSTFS_FAIL
+elif [ -n "$REQUIRE_MISSING" ]; then
+    VERDICT=REQUIRE_FAIL
 elif [ "$EXPECT_MISSING" = 1 ]; then
     VERDICT=CONTROL_FAIL
 elif grep -qF "$MARKER" "$OUT/boot.log" 2>/dev/null; then
@@ -254,6 +269,8 @@ esac
     echo "hostfs_missing=$HOSTFS_MISSING"
     echo "expect_bug=${EXPECT_BUG:-none}"
     echo "expect_bug_hits=$EXPECT_HITS"
+    echo "require=${REQUIRE:-none}"
+    echo "require_missing=${REQUIRE_MISSING:-none}"
     echo "boot_log_lines=$(wc -l < "$OUT/boot.log" 2>/dev/null || echo 0)"
     echo "kernel_bugs=$KBUGS"
     echo "guest_fail=$GUESTFAIL"

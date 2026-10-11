@@ -64,17 +64,13 @@ done
 # The port's fixed FP bug was seccomp-specific and showed up as two computations
 # disagreeing, not as a crash, so it is run rather than assumed.
 if [ -x /fptorture ]; then
-	# Through a file and with both descriptors, because fptorture writes with its
-	# own write(2) to a descriptor of its own choosing rather than to stdout: the
-	# first version captured $( ) and read back nothing while the torture passed,
-	# and then failed the gate for the empty string. The criterion is the marker,
-	# not the exit status -- which is this project's own rule, written down, and
-	# the one I broke here.
-	/fptorture > /tmp/fp.out 2>&1 || true
-	case "$(cat /tmp/fp.out 2>/dev/null)" in
-	*FPTORTURE_OK*) ;;
-	*) fail "fptorture said: $(cat /tmp/fp.out 2>/dev/null)" ;;
-	esac
+	# Run, not captured, and the exit status is not consulted either. fptorture
+	# opens /dev/console and writes there through a descriptor it opens itself,
+	# so no redirection inside the guest can read its output back: two versions of
+	# this gate checked an empty string while the torture passed. Its marker
+	# exists in exactly one place, the boot log, and the harness checks it there
+	# with REQUIRE.
+	/fptorture || true
 fi
 
 # --- 4. a multi-MB file on ext4, mapped and touched -------------------------
