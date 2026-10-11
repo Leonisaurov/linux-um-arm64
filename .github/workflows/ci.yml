@@ -50,7 +50,8 @@ jobs:
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
-              clang lld llvm bc flex bison libelf-dev libssl-dev zstd ccache
+              clang lld llvm bc flex bison libelf-dev libssl-dev zstd ccache \
+              e2fsprogs
           clang --version | head -1
           ld.lld --version | head -1
           nproc
@@ -82,6 +83,14 @@ jobs:
           set -euo pipefail
           export ART="$RUNNER_TEMP/artifacts"
           bash tools/um-arm64/harness/mkinitramfs.sh "$ART/initramfs.cpiogz"
+
+      # Gate 3's root filesystem. No root needed: mke2fs -d builds ext4 from a
+      # directory tree with libext2fs and never mounts anything.
+      - name: Build gate-3 root filesystem
+        run: |
+          set -euo pipefail
+          export ART="$RUNNER_TEMP/artifacts"
+          bash tools/um-arm64/harness/mkrootfs.sh "$ART/alpine.ext4"
 
       - name: ccache stats
         if: always()
@@ -117,18 +126,47 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Default path: the phone/desktop configuration, PTRACE_SYSEMU where
-          # the host has it and seccomp for userspace execution.
-          - name: default
+          # Gate 2: the freestanding guestinit as /init from an initramfs. This
+          # is the built-in default -- ptrace userspace with PTRACE_SYSEMU where
+          # the host has it. The code default really is ptrace: seccomp_config
+          # is a zero-initialised __initdata, so only seccomp=on/auto enable the
+          # fast path.
+          - name: g2-default
             extra: ""
-          # The port's own switch for the seccomp fast path.
-          - name: seccomp
+            initrd: initramfs.cpiogz
+            init: /init
+            marker: UMARM_GUEST_OK
+            ubd0: ""
+            timeout: "180"
+          # The seccomp fast path. `on` makes a non-functional seccomp fatal
+          # rather than a silent fallback to ptrace.
+          - name: g2-seccomp
             extra: "seccomp=on"
-          # Force the pre-5.3 arm64 fallback: PTRACE_SYSCALL plus a syscall
+            initrd: initramfs.cpiogz
+            init: /init
+            marker: UMARM_GUEST_OK
+            ubd0: ""
+            timeout: "180"
+          # The pre-5.3 arm64 fallback: PTRACE_SYSCALL plus a syscall
           # cancellation through NT_ARM_SYSTEM_CALL. This is the path a 4.19
           # Android kernel takes, and it is testable everywhere by design.
-          - name: nosysemu
+          - name: g2-nosysemu
             extra: "nosysemu"
+            initrd: initramfs.cpiogz
+            init: /init
+            marker: UMARM_GUEST_OK
+            ubd0: ""
+            timeout: "180"
+          # Gate 3: a real Alpine ext4 root filesystem from ubd0, which
+          # exercises the guest VFS, the block device, fork/exec and process
+          # teardown -- none of which the initramfs gate touches.
+          - name: g3-alpine
+            extra: "rw"
+            initrd: ""
+            init: /gate3-init
+            marker: UMARM_BOOT_OK
+            ubd0: alpine.ext4
+            timeout: "300"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -152,14 +190,15 @@ jobs:
           set -euo pipefail
           ls -la "$RUNNER_TEMP/artifacts"
           export BIN="$RUNNER_TEMP/artifacts/linux-um-arm64"
-          export INITRD="$RUNNER_TEMP/artifacts/initramfs.cpiogz"
           export ART="$RUNNER_TEMP/run"
-          export GATE="g2-${{ matrix.name }}"
-          export MARKER="UMARM_GUEST_OK"
-          export INIT=/init
-          export TIMEOUT=180
+          export GATE="${{ matrix.name }}"
+          export MARKER="${{ matrix.marker }}"
+          export INIT="${{ matrix.init }}"
+          export TIMEOUT="${{ matrix.timeout }}"
           export MEM=512M
           export EXTRA_ARGS="${{ matrix.extra }}"
+          [ -z "${{ matrix.initrd }}" ] || export INITRD="$RUNNER_TEMP/artifacts/${{ matrix.initrd }}"
+          [ -z "${{ matrix.ubd0 }}" ]   || export UBD0="$RUNNER_TEMP/artifacts/${{ matrix.ubd0 }}"
           bash tools/um-arm64/harness/native.sh
 
       - name: Upload boot log
@@ -167,7 +206,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: um-arm64-boot-${{ matrix.name }}
-          path: ${{ runner.temp }}/run/g2-${{ matrix.name }}
+          path: ${{ runner.temp }}/run/${{ matrix.name }}
           if-no-files-found: warn
           retention-days: 14
 
@@ -177,12 +216,12 @@ jobs:
           {
             echo "### boot gate: ${{ matrix.name }}"
             echo '```'
-            cat "$RUNNER_TEMP/run/g2-${{ matrix.name }}/result.txt" 2>/dev/null || echo "no result.txt"
+            cat "$RUNNER_TEMP/run/${{ matrix.name }}/result.txt" 2>/dev/null || echo "no result.txt"
             echo '```'
-            if [ -s "$RUNNER_TEMP/run/g2-${{ matrix.name }}/kernel-bugs.txt" ]; then
+            if [ -s "$RUNNER_TEMP/run/${{ matrix.name }}/kernel-bugs.txt" ]; then
               echo "#### kernel diagnostics"
               echo '```'
-              cat "$RUNNER_TEMP/run/g2-${{ matrix.name }}/kernel-bugs.txt"
+              cat "$RUNNER_TEMP/run/${{ matrix.name }}/kernel-bugs.txt"
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"

@@ -41,19 +41,37 @@ installed on Termux and is an avoidable moving part.
 
 ### The gate matrix
 
-| gate | `EXTRA_ARGS` | path exercised |
-| --- | --- | --- |
-| `default` | *(none)* | the built-in default: ptrace userspace with `PTRACE_SYSEMU` |
-| `seccomp` | `seccomp=on` | the seccomp fast path; `on` makes a non-functional seccomp a fatal error rather than a silent fallback |
-| `nosysemu` | `nosysemu` | `PTRACE_SYSCALL` plus a `NT_ARM_SYSTEM_CALL` cancellation, i.e. what a pre-5.3 arm64 host (a 4.19 Android kernel) does |
+| gate | fixture | `EXTRA_ARGS` | path exercised |
+| --- | --- | --- | --- |
+| `g2-default` | initramfs | *(none)* | the built-in default: ptrace userspace with `PTRACE_SYSEMU` |
+| `g2-seccomp` | initramfs | `seccomp=on` | the seccomp fast path; `on` makes a non-functional seccomp a fatal error rather than a silent fallback |
+| `g2-nosysemu` | initramfs | `nosysemu` | `PTRACE_SYSCALL` plus a `NT_ARM_SYSTEM_CALL` cancellation, i.e. what a pre-5.3 arm64 host (a 4.19 Android kernel) does |
+| `g3-alpine` | Alpine ext4 on `ubd0` | `rw` | guest VFS, block device, `fork`/`exec`, process teardown |
+
+The `g2` fixture is `harness/probe/guestinit.c` as `/init`: a freestanding
+aarch64 binary with its own `_start`, raw `svc #0` calls, one guest capability
+per line. It prints `UMARM_GUEST_OK` and powers the machine off. No busybox, no
+libc, no root filesystem, so there is nothing for the gate to fail on except the
+kernel. The newc archive is written by an inline Python writer -- `cpio` is not
+installed on Termux and is an avoidable moving part.
+
+The `g3` fixture is a real ext4 image (`mkrootfs.sh`) built from Alpine's
+pinned minirootfs with `harness/guest/gate3-init` as `/init`. Building it needs
+no root: `mke2fs -d <dir>` populates a filesystem with libext2fs and never
+mounts anything, and the Alpine tarball contains no device nodes, which is the
+only thing that would have needed privilege. `gate3-init` prints its marker only
+after every check has passed -- `uname -m`, a pipeline with a checkable result,
+reads and writes through the VFS, the root device really being `/dev/ubda`,
+200 sequential `fork`/`exec`, and 16 concurrent children.
 
 The boot log names the mode, so the gate is checkable rather than assumed
 (`arch/um/os-Linux/start_up.c`):
 
 ```
-default   Userspace mode: ptrace      + Checking syscall emulation for ptrace...OK
-seccomp   Userspace mode: SECCOMP
-nosysemu  Userspace mode: ptrace      + Checking syscall emulation...skipped (nosysemu)
+g2-default   Userspace mode: ptrace      + Checking syscall emulation for ptrace...OK
+g2-seccomp   Userspace mode: SECCOMP
+g2-nosysemu  Userspace mode: ptrace      + Checking syscall emulation...skipped (nosysemu)
+g3-alpine    GATE3 ok root=/dev/ubda arch=aarch64 sum=5050 procs=200+16
 ```
 
 Note that the **built-in default is ptrace**, not seccomp:
@@ -179,16 +197,25 @@ Two more Termux notes:
 
 ## Extending the matrix
 
-The next gate worth adding is **gate 3**: a real ext4 root filesystem from
-`ubd0`. It needs no root to build -- `mkfs.ext4 -d <dir> image.ext4 <size>`
-populates the image from a directory -- so CI can build one from an
-`alpine-minirootfs` tarball and boot it with `UBD0=<image> root=/dev/ubda`.
-That exercises the guest VFS, `fork`/`exec` and the block device, none of which
-the initramfs gate touches.
-
 `harness/loop.sh` lists the full gate matrix the port used
 (`g2mini g2alpine g3 g5 g3noaslr g4 fp fpnoaslr`) with the markers and init
-scripts each one needs. Those init scripts and the rootfs images lived in the
-original repository outside the kernel tree and are not part of this snapshot;
-the `guestinit` fixture replaces `g2mini` and is the only one that needs no
-rootfs. Everything else has to be recreated as the Alpine image above.
+scripts each one needs. The `g2` and `g3` columns above are covered. Still
+missing, and worth adding in roughly this order:
+
+* **`g4`** -- fork/exec stress at 2000 sequential and 64 concurrent processes,
+  with a pipeline whose sum is checked. `gate3-init` already does a scaled-down
+  version (200 + 16); `g4` is the same shape with an order of magnitude more.
+* **`fp`** -- the FP/SIMD and FPCR/FPSR torture (`probe/fptorture.c`, marker
+  `FPTORTURE_OK`). This is not optional: the port has a fixed bug here, where
+  guest FP/SIMD state was not saved across a signal in seccomp mode because the
+  guard compared the wrong size.
+* **`noaslr`** -- the same gates with `probe/noaslr_preload.so` in `LD_PRELOAD`,
+  which simulates an Android host that denies a `personality()` change.
+* **`docker`** -- `config/docker.config`, cgroup v2 and `overlay2`, the heaviest
+  and least CI-shaped gate.
+
+The original `init` scripts and rootfs images for those gates lived in the
+repository's sibling directories, outside the kernel tree, and are not part of
+this snapshot. `guestinit` and `gate3-init` replace `g2mini` and `g3`; the rest
+have to be recreated, and `mkrootfs.sh` is the tool for the ones that need a
+root filesystem.
