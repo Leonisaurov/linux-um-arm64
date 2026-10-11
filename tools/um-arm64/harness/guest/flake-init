@@ -1,0 +1,105 @@
+#!/bin/sh
+# The perturbation gate: load a module, then do the work the other gates do, in
+# the same boot.
+#
+# The port's own notes say the flake result does not carry over to modules,
+# because loading one changes vmalloc usage and the guest's address-space layout,
+# and that is exactly where the stub pages live. That is a statement about a
+# *boot*, not about a build: a module loaded in one UML process is gone when that
+# process exits, so a loop that runs the ordinary gates next to a module gate
+# tests two unrelated things and would report green either way.
+#
+# So this init loads the module first and then, in the same address space, does
+# the work the other gates do in isolation: fork/exec at volume, the FP/SIMD
+# torture, a multi-MB file mapped and touched, and a write through hostfs. If
+# modules moved something that the stub depends on, this is where it shows, and
+# it shows as a flake rather than as a diagnosis -- which is why it is run
+# hundreds of times by harness/ci-flake.sh rather than once by a gate.
+#
+# Run as:  init=/flake-init ubd0=alpine.ext4 root=/dev/ubda rw hostfs=<dir>
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+export PATH
+
+fail() {
+	echo "GATEFLAKE_FAIL: $*"
+	exit 1
+}
+
+mkdir -p /proc /sys /dev /tmp /mnt/host 2>/dev/null
+mount -t proc     proc     /proc 2>/dev/null
+mount -t sysfs    sysfs    /sys  2>/dev/null
+mount -t devtmpfs devtmpfs /dev  2>/dev/null
+mount -t tmpfs    tmpfs    /tmp  2>/dev/null
+
+[ -r /proc/self/stat ] || fail "procfs is not mounted"
+
+# --- 1. the perturbation, before anything else ------------------------------
+# Loaded and left loaded: the point is the state the rest of the work runs in,
+# not that insmod works. It is unloaded at the end, after everything else has
+# happened in the perturbed address space.
+if [ -r /proc/modules ]; then
+	[ -d /mnt/host ] || fail "no mount point for the module share"
+	mount -t hostfs hostfs /mnt/host || fail "mount -t hostfs"
+	set -- /mnt/host/*.ko
+	if [ -f "$1" ]; then
+		for ko in "$@"; do
+			insmod "$ko" || fail "insmod $(basename "$ko")"
+		done
+		grep -q '^binfmt_misc ' /proc/modules || fail "binfmt_misc is not loaded"
+		grep -q 'binfmt_misc' /proc/filesystems || fail "binfmt_misc registered no filesystem"
+	fi
+fi
+
+# --- 2. fork/exec at volume, in the perturbed layout ------------------------
+# 200 sequential children is what gate 3 does; it is also the cheapest way to
+# allocate and free 200 guest address spaces on top of the module's allocation.
+i=0
+while [ "$i" -lt 200 ]; do
+	/bin/true || fail "fork/exec iteration $i"
+	i=$((i + 1))
+done
+
+# --- 3. FP/SIMD, in the perturbed layout ------------------------------------
+# The port's fixed FP bug was seccomp-specific and showed up as two computations
+# disagreeing, not as a crash, so it is run rather than assumed.
+if [ -x /fptorture ]; then
+	out=$(/fptorture) || fail "fptorture failed: $out"
+	case "$out" in
+	*FPTORTURE_OK*) ;;
+	*) fail "fptorture said: $out" ;;
+	esac
+fi
+
+# --- 4. a multi-MB file on ext4, mapped and touched -------------------------
+# The rss gate's workload, which is the one that reaches finish_fault() with a
+# large folio. /tmp is a tmpfs here, so the file goes on the image.
+if [ -d /var/tmp ] && [ -w /var/tmp ]; then
+	dd if=/dev/zero of=/var/tmp/flake-big bs=64k count=64 2>/dev/null || fail "dd failed"
+	# Read it back through the page cache and then fault it in through a
+	# mapping, which is what makes the folios MM_FILEPAGES.
+	cat /var/tmp/flake-big > /dev/null || fail "read back failed"
+	rm -f /var/tmp/flake-big || fail "rm failed"
+fi
+
+# --- 5. hostfs, from the host's side of the boundary ------------------------
+# The guest's half of gate 5: the host checks the file afterwards.
+if [ -d /mnt/host ] && [ -w /mnt/host ]; then
+	printf 'flake-guest\n' > /mnt/host/from-guest-flake.txt || fail "hostfs write"
+fi
+
+# --- 6. unload, after everything has run in the perturbed space -------------
+if [ -r /proc/modules ] && command -v rmmod >/dev/null 2>&1; then
+	set -- /mnt/host/*.ko
+	for ko in "$@"; do
+		[ -f "$ko" ] || continue
+		mod=$(basename "$ko" .ko)
+		rmmod "$mod" || fail "rmmod $mod"
+	done
+fi
+
+echo "GATEFLAKE ok modules=$(grep -c . /proc/modules) procs=200"
+echo "UMARM_BOOT_OK"
+
+sync
+exec /umarm-poweroff

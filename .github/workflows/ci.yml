@@ -19,7 +19,18 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  workflow_dispatch: {}
+  # The flake loop is a campaign rather than a gate: 200 iterations is about
+  # twenty minutes, and a loop that runs on every push is a loop people turn off.
+  # Weekly, and on demand with a smaller n when the wiring itself is what is
+  # being checked.
+  schedule:
+    - cron: '23 4 * * 0'
+  workflow_dispatch:
+    inputs:
+      n:
+        description: 'flake loop iterations'
+        required: false
+        default: '200'
 
 permissions:
   contents: read
@@ -532,6 +543,80 @@ jobs:
             ${{ github.workspace }}/tools/um-arm64/dist/umapp/build/
           if-no-files-found: warn
           retention-days: 14
+
+  # The flake loop, against the kernel that has loaded a module.
+  #
+  # This is the item the port's own notes rank first among the open ones and the
+  # only one they say explicitly does not carry over: "the 550/550 flake result
+  # does not carry over. It has to be re-run after modules land, against a kernel
+  # that has actually loaded one." Loading a module changes vmalloc usage and the
+  # guest's address-space layout, which is exactly where the stub pages live.
+  #
+  # Two things make this the loop that answers that rather than a loop that looks
+  # like it does. It runs the modules kernel, and harness/guest/flake-init loads a
+  # module and then does the fork/exec, the FP torture, the file mapping and the
+  # hostfs write *in the same boot* -- because a module loaded in one UML process
+  # is gone when that process exits, so a matrix that merely sits next to a
+  # module gate would report green either way. And the criterion is native.sh's
+  # verdict rather than the marker string, which is the criterion that missed the
+  # rss leak.
+  flake:
+    name: flake loop (modules)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04-arm
+    needs: build
+    timeout-minutes: 240
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: um-arm64-kernels
+          path: ${{ runner.temp }}/artifacts
+
+      - name: Relax ptrace scope
+        run: sudo sysctl -w kernel.yama.ptrace_scope=0 || true
+
+      # Only the rss row needs it, and it is sampled: the row exists because the
+      # mapping path is one of the things a loaded module can perturb.
+      - name: Build Debian root filesystem
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends debootstrap e2fsprogs
+          DISTRO=debian SIZE=2G \
+            bash tools/um-arm64/harness/mkrootfs.sh "$RUNNER_TEMP/artifacts/debian.ext4"
+
+      - name: Run the loop
+        run: |
+          set -euo pipefail
+          export ART="$RUNNER_TEMP/artifacts"
+          export KERNEL="$RUNNER_TEMP/artifacts/modules"
+          export N="${{ github.event.inputs.n || 200 }}"
+          export OUT="$RUNNER_TEMP/flake"
+          echo "N=$N kernel=$KERNEL"
+          bash tools/um-arm64/harness/ci-flake.sh
+
+      - name: Upload the loop
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: um-arm64-flake
+          path: ${{ runner.temp }}/flake/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Step summary
+        if: always()
+        run: |
+          {
+            echo "### flake loop"
+            echo '```'
+            tail -20 "$RUNNER_TEMP/flake/results.tsv" 2>/dev/null || echo "no results.tsv"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   umdebian:
     name: umdebian (shipped artifact)

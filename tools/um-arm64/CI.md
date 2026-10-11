@@ -33,6 +33,7 @@ share removed.
 | `net-helpers` | `ubuntu-24.04-arm` | builds `umnet` and gates it with `ci-umnet.sh`: no kernel, no passt and no root needed |
 | `android` | `ubuntu-24.04-arm` | builds the kernel against the **Android NDK** for bionic, at 16 KB and 4 KB, and publishes `um-arm64-android` -- the artifact to download and run on a phone |
 | `boot` (matrix) | `ubuntu-24.04-arm` | downloads the artifact and runs `native.sh` for each gate, booting whichever kernel that gate names |
+| `flake` | `ubuntu-24.04-arm` | the flake loop, on a schedule and on demand: `harness/ci-flake.sh` runs the matrix N times against the **modules** kernel and tallies it. Not a gate -- it is a campaign, and 200 iterations is twenty minutes |
 | `umapp` | `ubuntu-24.04` | builds `dist/umapp` into an APK with `aapt2`/`javac`/`d8`/`apksigner` and verifies it with `ci-umapp.sh`. On an x86_64 runner for the same reason as `android`: the arm64 runner images install no Android SDK at all, and the command-line tools package is an x86_64 build. Nothing is downloaded -- the x86_64 image ships build-tools and platforms under `$ANDROID_HOME` |
 | `umdebian` | `ubuntu-24.04-arm` | builds a Debian root filesystem, assembles `dist/umdebian`, and drives the shipped launcher through its documented contract with `ci-umdebian.sh` |
 
@@ -598,6 +599,38 @@ Each of these was invisible to the port's original machine and immediate here:
    report a missing toolchain in words. Reproduced locally before fixing, under
    `set -euo pipefail` rather than in an interactive shell: the first version of
    the local test had not set `pipefail` and therefore passed.
+
+### The flake loop
+
+`flake` is the item the port's own notes rank first among the open ones, and the
+only one they say explicitly does not carry over: *"the 550/550 flake result does
+not carry over. It has to be re-run after modules land, against a kernel that has
+actually loaded one."* Loading a module changes vmalloc usage and the guest's
+address-space layout, which is exactly where the stub pages live.
+
+Two things make this the loop that answers that rather than a loop that looks like
+it does.
+
+**The perturbation is inside a boot.** A module loaded in one UML process is gone
+when that process exits, so a matrix that merely sits next to a module gate tests
+two unrelated things and would report green either way.
+`harness/guest/flake-init` loads the module first and then does the fork/exec at
+volume, the FP torture, the multi-MB file mapping and the hostfs write *in the
+same address space*, and unloads it after everything has run. It is in the matrix
+every iteration; a sampled perturbation is not a perturbation. The loop also
+refuses to run at all if it finds no `.ko`, because an empty set would be a green
+loop that tested nothing.
+
+**The criterion is the verdict, not the marker.** `loop.sh`'s criterion is the
+marker string, and the marker is exactly the criterion that missed the rss leak --
+a run that printed its marker was never scanned. `native.sh` scans for kernel
+diagnostics independently and reports `verdict=BUG`, so a run with a defect in its
+log cannot pass here even with its marker present. That difference is tested: a
+kernel printing both its marker and a BUG line fails the loop.
+
+The expensive rows are sampled, as in `loop.sh`: g4 spawns 2000 processes and fp
+runs ~8500 verify iterations, and running both every pass would put the loop past
+a day, which means it would not be run at all.
 
 ## Running the same gates locally
 
