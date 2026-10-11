@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Which USB devices the app is allowed to be told about.
+
+  Android delivers USB_DEVICE_ATTACHED to an activity only for devices that match
+  a filter it declares, and this is that filter. Without the file, the manifest's
+  @xml/device_filter is an unresolved reference and aapt2 link fails rather than
+  producing an APK that merely lacks the attach prompt -- which is a good failure
+  to have, and the reason it is checked for in harness/ci-umapp.sh as well.
+
+  The device is the one doc/100-usb.md names: a TP-Link RTL8811AU, 2357:011f,
+  which the guest binds with the in-tree rtw88_8821au driver. The values are
+  decimal because that is what the platform's parser expects; 2357 and 011f are
+  hex in the documentation, which is how lsusb prints them.
+
+  Adding a different adapter is one more <usb-device> line. Matching a whole
+  vendor is also allowed (vendor-id alone), at the cost of the attach prompt
+  appearing for every device that vendor makes.
+-->
+<resources>
+    <usb-device vendor-id="9047" product-id="287" />
+</resources>
