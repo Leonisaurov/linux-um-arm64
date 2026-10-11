@@ -72,12 +72,29 @@ if [ ! -f "$O/.config" ]; then
     "${MAKE[@]}" defconfig || exit 1
 fi
 
+# EXTRA_CONFIG: space-separated config fragments, relative to the tree, merged
+# into the defconfig before olddefconfig. The docker gate needs a kernel built
+# with tools/um-arm64/config/docker.config, and a different config is a different
+# build; merge_config.sh plus olddefconfig is the tree's own way of doing it.
+if [ -n "${EXTRA_CONFIG:-}" ]; then
+    for frag in $EXTRA_CONFIG; do
+        [ -f "$TREE/$frag" ] || { echo "ci-build.sh: no config fragment $TREE/$frag" >&2; exit 2; }
+    done
+    echo "### merge $EXTRA_CONFIG"
+    ( cd "$TREE" && scripts/kconfig/merge_config.sh -m -O "$O" "$O/.config" $EXTRA_CONFIG ) || exit 1
+    "${MAKE[@]}" olddefconfig || exit 1
+fi
+
+# Name the artifact after the config so a run cannot be misread as the other
+# kernel: the default and the docker build produce the same file name.
+KERNEL_NAME=${KERNEL_NAME:-linux-um-arm64}
+
 echo "### build"
 "${MAKE[@]}" "$TARGET" || exit 1
 
 [ -x "$O/linux" ] || { echo "ci-build.sh: no $O/linux after build" >&2; exit 1; }
 
-install -m 0755 "$O/linux" "$ART/linux-um-arm64"
+install -m 0755 "$O/linux" "$ART/$KERNEL_NAME"
 cp -f "$O/.config" "$ART/kernel.config"
 
 # The stub is only produced as a side effect of linking the kernel. It is not
@@ -101,8 +118,9 @@ echo "### preload $ART/noaslr_preload.so ($(stat -c %s "$ART/noaslr_preload.so")
 {
     echo "head=$(git -C "$TREE" rev-parse HEAD 2>/dev/null || echo unknown)"
     echo "clang=$(clang --version | head -1)"
-    echo "size_linux=$(stat -c %s "$ART/linux-um-arm64")"
-    echo "sha256_linux=$(sha256sum "$ART/linux-um-arm64" | cut -d' ' -f1)"
+    echo "extra_config=${EXTRA_CONFIG:-none}"
+    echo "size_linux=$(stat -c %s "$ART/$KERNEL_NAME")"
+    echo "sha256_linux=$(sha256sum "$ART/$KERNEL_NAME" | cut -d' ' -f1)"
     echo "size_stub=$(stat -c %s "$ART/stub_exe")"
     echo "sha256_stub=$(sha256sum "$ART/stub_exe" | cut -d' ' -f1)"
     echo "sha256_preload=$(sha256sum "$ART/noaslr_preload.so" | cut -d' ' -f1)"

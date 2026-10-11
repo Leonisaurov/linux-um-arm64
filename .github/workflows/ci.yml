@@ -9,8 +9,10 @@ name: um-arm64 CI
 # process and can be built and booted on the same machine, which is what the
 # port set out to demonstrate. No qemu, no TCG, no ssh staging.
 #
-# The gate verdict is the marker string in the boot log, never the exit status,
-# plus an independent BUG:/WARNING: scan (harness/native.sh).
+# Every gate's verdict is a marker string in the boot log plus an independent
+# BUG:/WARNING: scan (harness/native.sh), and several gates add a check on the
+# *host* side of the boundary they test (LD_PRELOAD shim loaded, hostfs write
+# visible, guest compiler output correct).
 
 on:
   push:
@@ -22,8 +24,6 @@ on:
 permissions:
   contents: read
 
-# One build per ref. A cancelled run must not race a live one, and the ccache
-# key churns for no reason when two runs overlap.
 concurrency:
   group: um-arm64-${{ github.ref }}
   cancel-in-progress: true
@@ -32,7 +32,7 @@ jobs:
   build:
     name: build (native aarch64)
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 120
+    timeout-minutes: 150
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -51,7 +51,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
               clang lld llvm bc flex bison libelf-dev libssl-dev zstd ccache \
-              e2fsprogs
+              e2fsprogs debootstrap
           clang --version | head -1
           ld.lld --version | head -1
           nproc
@@ -59,9 +59,9 @@ jobs:
       # ccache keyed by commit with a stable prefix. Restore/save are separate
       # on purpose: the save runs `if: always()`, so a build that fails late
       # still leaves its compiler cache behind and the next attempt is
-      # incremental. The cache holds only the compiler cache, never build
-      # outputs, so a stale restore cannot splice an old object into a new
-      # binary -- ccache hashes inputs, it does not trust mtimes.
+      # incremental. Only the compiler cache is cached, never build outputs, so
+      # a stale restore cannot splice an old object into a new binary -- ccache
+      # hashes inputs, it does not trust mtimes. Both kernels below share it.
       - name: Restore ccache
         uses: actions/cache/restore@v4
         with:
@@ -70,27 +70,37 @@ jobs:
           restore-keys: |
             ccache-um-arm64-
 
-      - name: Build kernel + stub
+      # Two kernels, in separate directories so a run cannot be misread: the
+      # shipped arm64_defconfig, and the same tree with config/docker.config
+      # merged, which the docker prerequisites gate needs.
+      - name: Build kernel (default config)
         run: |
           set -euo pipefail
           export O="$RUNNER_TEMP/umarm-build"
-          export ART="$RUNNER_TEMP/artifacts"
+          export ART="$RUNNER_TEMP/artifacts/default"
           export CCACHE_DIR="$RUNNER_TEMP/ccache"
           bash tools/um-arm64/harness/ci-build.sh
+
+      - name: Build kernel (docker config)
+        run: |
+          set -euo pipefail
+          export O="$RUNNER_TEMP/umarm-build-docker"
+          export ART="$RUNNER_TEMP/artifacts/docker"
+          export CCACHE_DIR="$RUNNER_TEMP/ccache"
+          export EXTRA_CONFIG="tools/um-arm64/config/docker.config"
+          bash tools/um-arm64/harness/ci-build.sh
+
+      - name: Build Alpine root filesystem
+        run: |
+          set -euo pipefail
+          export ART="$RUNNER_TEMP/artifacts"
+          bash tools/um-arm64/harness/mkrootfs.sh "$ART/alpine.ext4"
 
       - name: Build initramfs gate fixture
         run: |
           set -euo pipefail
           export ART="$RUNNER_TEMP/artifacts"
           bash tools/um-arm64/harness/mkinitramfs.sh "$ART/initramfs.cpiogz"
-
-      # Gate 3's root filesystem. No root needed: mke2fs -d builds ext4 from a
-      # directory tree with libext2fs and never mounts anything.
-      - name: Build gate-3 root filesystem
-        run: |
-          set -euo pipefail
-          export ART="$RUNNER_TEMP/artifacts"
-          bash tools/um-arm64/harness/mkrootfs.sh "$ART/alpine.ext4"
 
       - name: ccache stats
         if: always()
@@ -107,128 +117,69 @@ jobs:
 
       # Uploaded as one directory, not a list of files. upload-artifact roots an
       # artifact at the least common ancestor of its paths, so a list spanning
-      # $RUNNER_TEMP/artifacts/* and $RUNNER_TEMP/initramfs.cpiogz gets rooted at
-      # $RUNNER_TEMP and downloads back as artifacts/artifacts/... . Everything
-      # the boot job needs already lives under $ART, so upload exactly that.
-      - name: Upload kernel artifacts
+      # several directories gets rooted above them and downloads back nested.
+      # Everything the boot job needs is under $RUNNER_TEMP/artifacts.
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: um-arm64-kernel
+          name: um-arm64-kernels
           path: ${{ runner.temp }}/artifacts/
           retention-days: 14
 
   boot:
-    name: boot gate (${{ matrix.name }}, native aarch64)
+    name: ${{ matrix.name }}
     needs: build
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Gate 2: the freestanding guestinit as /init from an initramfs. This
-          # is the built-in default -- ptrace userspace with PTRACE_SYSEMU where
-          # the host has it. The code default really is ptrace: seccomp_config
-          # is a zero-initialised __initdata, so only seccomp=on/auto enable the
-          # fast path.
-          - name: g2-default
-            extra: ""
-            initrd: initramfs.cpiogz
-            init: /init
-            marker: UMARM_GUEST_OK
-            ubd0: ""
-            timeout: "180"
-          # The seccomp fast path. `on` makes a non-functional seccomp fatal
-          # rather than a silent fallback to ptrace.
-          - name: g2-seccomp
-            extra: "seccomp=on"
-            initrd: initramfs.cpiogz
-            init: /init
-            marker: UMARM_GUEST_OK
-            ubd0: ""
-            timeout: "180"
-          # The pre-5.3 arm64 fallback: PTRACE_SYSCALL plus a syscall
-          # cancellation through NT_ARM_SYSTEM_CALL. This is the path a 4.19
-          # Android kernel takes, and it is testable everywhere by design.
-          - name: g2-nosysemu
-            extra: "nosysemu"
-            initrd: initramfs.cpiogz
-            init: /init
-            marker: UMARM_GUEST_OK
-            ubd0: ""
-            timeout: "180"
-          # Gate 3: a real Alpine ext4 root filesystem from ubd0, which
-          # exercises the guest VFS, the block device, fork/exec and process
-          # teardown -- none of which the initramfs gate touches.
-          - name: g3-alpine
-            extra: "rw"
-            initrd: ""
-            init: /gate3-init
-            marker: UMARM_BOOT_OK
-            ubd0: alpine.ext4
-            timeout: "300"
-          # The FP/SIMD torture, from the same root filesystem. All 32 vector
-          # registers plus FPCR/FPSR, bit-exact, across a syscall round-trip, a
-          # task switch and a signal -- the three state paths that are not the
-          # GPR set. Run in both userspace modes on purpose: the port's fixed
-          # bug here was specific to seccomp, where the guest's FP state was
-          # never saved or restored across a signal.
-          - name: fp-ptrace
-            extra: "rw"
-            initrd: ""
-            init: /fp-init
-            marker: FPTORTURE_OK
-            ubd0: alpine.ext4
-            timeout: "600"
-          - name: fp-seccomp
-            extra: "rw seccomp=on"
-            initrd: ""
-            init: /fp-init
-            marker: FPTORTURE_OK
-            ubd0: alpine.ext4
-            timeout: "600"
-          # Fork/exec at volume: 2000 sequential children and 64 alive at once.
-          # One stub per guest mm means 64 stub processes, which is where the
-          # port's reaper and stub-lifetime bugs lived, and none of the gates
-          # above start more than a handful of processes.
-          - name: g4-alpine
-            extra: "rw"
-            initrd: ""
-            init: /gate4-init
-            marker: UMARM_BOOT_OK
-            ubd0: alpine.ext4
-            timeout: "900"
-          # The same two gates with a host that forbids ADDR_NO_RANDOMIZE, via
-          # an LD_PRELOAD shim on the UML process itself. The goal states that
-          # personality() may be blocked on Android, so the address-space layout
-          # must not depend on it -- and this is what proves it does not, here
-          # rather than on a phone after the layout is settled.
-          - name: g3-noaslr
-            extra: "rw"
-            initrd: ""
-            init: /gate3-init
-            marker: UMARM_BOOT_OK
-            ubd0: alpine.ext4
-            timeout: "300"
-            preload: noaslr_preload.so
-            preload_marker: noaslr_preload_active
-          - name: fp-noaslr
-            extra: "rw"
-            initrd: ""
-            init: /fp-init
-            marker: FPTORTURE_OK
-            ubd0: alpine.ext4
-            timeout: "600"
-            preload: noaslr_preload.so
-            preload_marker: noaslr_preload_active
+          # --- gate 2: the freestanding guestinit as /init, from an initramfs.
+          # This is the built-in default: ptrace userspace with PTRACE_SYSEMU
+          # where the host has it. The code default really is ptrace --
+          # seccomp_config is a zero-initialised __initdata, so only
+          # seccomp=on/auto enable the fast path.
+          - { name: g2-default,   kernel: default, initrd: initramfs.cpiogz, init: /init,         marker: UMARM_GUEST_OK,  timeout: "180" }
+          - { name: g2-seccomp,   kernel: default, initrd: initramfs.cpiogz, init: /init,         marker: UMARM_GUEST_OK,  timeout: "180", extra: "seccomp=on" }
+          - { name: g2-nosysemu,  kernel: default, initrd: initramfs.cpiogz, init: /init,         marker: UMARM_GUEST_OK,  timeout: "180", extra: "nosysemu" }
+          # --- gate 3: a real Alpine ext4 root filesystem from ubd0, which
+          # exercises the guest VFS, the block device, fork/exec and teardown.
+          - { name: g3-alpine,    kernel: default, ubd0: alpine.ext4, init: /gate3-init,          marker: UMARM_BOOT_OK,   timeout: "300", extra: "rw" }
+          # --- gate 4: fork/exec at volume. One stub per guest mm, so 64
+          # concurrent children are 64 stub processes.
+          - { name: g4-alpine,    kernel: default, ubd0: alpine.ext4, init: /gate4-init,          marker: UMARM_BOOT_OK,   timeout: "900", extra: "rw" }
+          # --- gate 5: hostfs. The check that matters is on this side of the
+          # boundary: the file the guest wrote has to be readable here.
+          - { name: g5-hostfs,    kernel: default, ubd0: alpine.ext4, init: /gate5-init,          marker: UMARM_BOOT_OK,   timeout: "300", extra: "rw", hostfs: "yes" }
+          # --- FP/SIMD: the state that is not the GPR set. Not redundant
+          # between the two: the port's fixed bug here was seccomp-specific.
+          - { name: fp-ptrace,    kernel: default, ubd0: alpine.ext4, init: /fp-init,             marker: FPTORTURE_OK,    timeout: "600", extra: "rw" }
+          - { name: fp-seccomp,   kernel: default, ubd0: alpine.ext4, init: /fp-init,             marker: FPTORTURE_OK,    timeout: "600", extra: "rw seccomp=on" }
+          # --- the same two gates against a host that forbids
+          # ADDR_NO_RANDOMIZE, which is what Android does. The shim is
+          # self-proving: PRELOAD_MARKER is required or the run cannot pass.
+          - { name: g3-noaslr,    kernel: default, ubd0: alpine.ext4, init: /gate3-init,          marker: UMARM_BOOT_OK,   timeout: "300", extra: "rw", preload: noaslr_preload.so, preload_marker: noaslr_preload_active }
+          - { name: fp-noaslr,    kernel: default, ubd0: alpine.ext4, init: /fp-init,             marker: FPTORTURE_OK,    timeout: "600", extra: "rw", preload: noaslr_preload.so, preload_marker: noaslr_preload_active }
+          # --- gate 7: a Debian userland, built here, where the guest's own gcc
+          # produces a program that uses libm and pthreads and checks its own
+          # output. The original gate 7 also ran apt inside the guest, which
+          # needs guest networking that CI cannot provide; build-essential is
+          # baked into the image instead and the compiler is what is tested.
+          - { name: g7-debian,    kernel: default, ubd0: debian.ext4, init: /gate7-init,          marker: UMARM_BOOT_OK,   timeout: "900", extra: "rw", debian: "yes" }
+          # --- docker prerequisites, on the kernel built with docker.config.
+          # Not dockerd: no containerd, runc or image fits here. What it checks
+          # is the list that config exists for, which is where the port's own
+          # "docker starts and runs" claim turned out to be false.
+          - { name: docker-prereqs, kernel: docker, ubd0: debian.ext4, init: /docker-init,        marker: UMARM_BOOT_OK,   timeout: "900", extra: "rw", debian: "yes" }
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download kernel artifacts
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          name: um-arm64-kernel
+          name: um-arm64-kernels
           path: ${{ runner.temp }}/artifacts
 
       # UML is the ptrace tracer of its own stub children. yama ptrace_scope=1
@@ -239,11 +190,21 @@ jobs:
           cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo "no yama"
           sudo sysctl -w kernel.yama.ptrace_scope=0 || true
 
+      # debootstrap is only paid for by the two gates that need a Debian guest.
+      - name: Build Debian root filesystem
+        if: matrix.debian == 'yes'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends debootstrap e2fsprogs
+          DISTRO=debian SIZE=2G \
+            bash tools/um-arm64/harness/mkrootfs.sh "$RUNNER_TEMP/artifacts/debian.ext4"
+
       - name: Boot gate
         run: |
           set -euo pipefail
-          ls -la "$RUNNER_TEMP/artifacts"
-          export BIN="$RUNNER_TEMP/artifacts/linux-um-arm64"
+          ls -la "$RUNNER_TEMP/artifacts" "$RUNNER_TEMP/artifacts/${{ matrix.kernel }}" || true
+          export BIN="$RUNNER_TEMP/artifacts/${{ matrix.kernel }}/linux-um-arm64"
           export ART="$RUNNER_TEMP/run"
           export GATE="${{ matrix.name }}"
           export MARKER="${{ matrix.marker }}"
@@ -255,6 +216,10 @@ jobs:
           [ -z "${{ matrix.ubd0 }}" ]   || export UBD0="$RUNNER_TEMP/artifacts/${{ matrix.ubd0 }}"
           [ -z "${{ matrix.preload }}" ] || export PRELOAD="$RUNNER_TEMP/artifacts/${{ matrix.preload }}"
           [ -z "${{ matrix.preload_marker }}" ] || export PRELOAD_MARKER="${{ matrix.preload_marker }}"
+          if [ "${{ matrix.hostfs }}" = yes ]; then
+            export HOSTFS="$RUNNER_TEMP/hostshare"
+            export HOSTFS_CHECK="renamed-guest.txt"
+          fi
           bash tools/um-arm64/harness/native.sh
 
       - name: Upload boot log
@@ -270,7 +235,7 @@ jobs:
         if: always()
         run: |
           {
-            echo "### boot gate: ${{ matrix.name }}"
+            echo "### ${{ matrix.name }}"
             echo '```'
             cat "$RUNNER_TEMP/run/${{ matrix.name }}/result.txt" 2>/dev/null || echo "no result.txt"
             echo '```'

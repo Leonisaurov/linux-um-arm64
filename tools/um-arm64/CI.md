@@ -52,6 +52,9 @@ installed on Termux and is an avoidable moving part.
 | `g4-alpine` | Alpine ext4 on `ubd0` | `rw` | 2000 sequential `fork`/`exec` and 64 children alive at once |
 | `g3-noaslr` | Alpine ext4 on `ubd0` | `rw` + host `LD_PRELOAD` | gate 3 with `personality()` failing, i.e. an Android host |
 | `fp-noaslr` | Alpine ext4 on `ubd0` | `rw` + host `LD_PRELOAD` | the FP torture under the same simulated host |
+| `g5-hostfs` | Alpine ext4 on `ubd0` | `rw` + `hostfs=<dir>` | the host filesystem bridge, verified from the host side |
+| `g7-debian` | Debian ext4 on `ubd0` | `rw` | a real gcc and glibc in the guest, with the program's output checked |
+| `docker-prereqs` | Debian ext4 on `ubd0` | `rw` (kernel built with `docker.config`) | cgroup v2, overlayfs, namespaces, veth/bridge, nftables |
 
 The `g2` fixture is `harness/probe/guestinit.c` as `/init`: a freestanding
 aarch64 binary with its own `_start`, raw `svc #0` calls, one guest capability
@@ -123,6 +126,41 @@ unchanged in both (`0xff8000000000`).
 `preload_marker=` and `preload_missing=`, and copies the library into the run
 directory, so a run says which host it simulated.
 
+The `g5` fixture is `harness/guest/gate5-init`, on the Alpine image again, with
+`hostfs=<dir>` on the kernel command line -- which both sets the default root and
+*confines* every hostfs mount to that tree. hostfs is not a block device: every
+guest `open`, read, write and rename becomes a host syscall against a real path.
+The gate reads a file `native.sh` seeded, writes 256 KiB, reads it back, and
+renames it -- because `doc/30-syscall-budget.md` singles out `renameat2()`, and a
+sandbox that omits it breaks `mv` months later. The half that carries the risk is
+verified **on the host**: `native.sh` removes the output before the run and
+requires it to exist afterwards as `HOSTFS_CHECK`, so the guest's own word is not
+the evidence.
+
+The `g7` fixture is `harness/guest/gate7-init`, on a Debian image built by
+`mkrootfs.sh DISTRO=debian` with `debootstrap` (which needs root, and only to
+`chown` and make device nodes inside a tree it never mounts). The port's original
+gate 7 ran `apt install build-essential` *inside* the guest, which needs guest
+networking that CI cannot provide; build-essential is baked into the image
+instead, and the gate keeps the part that carries the risk. The guest's own gcc
+compiles a program that uses **libm and pthreads** and checks itself: the
+`sqrt` identity, the same sum computed through `sqrt` and `pow` compared against
+each other, and four threads over a shared counter. That is the shape of the bug
+the port fixed -- FP state corrupted across a task switch or a signal shows up as
+two computations disagreeing, not as a crash.
+
+The `docker-prereqs` fixture is `harness/guest/docker-init` on that same Debian
+image, with a kernel built from `config/docker.config`. **It is not `dockerd`**:
+containerd, runc and an image do not fit in CI, and neither does pulling one. It
+checks the prerequisites that file exists for, read from the *running* kernel
+through `/proc/config.gz` rather than trusted from the build host, plus cgroup v2
+mounting, overlayfs mounting and writing through to `upperdir`, `unshare` of
+every namespace, a veth pair into a bridge, and an nftables `nat` table. The
+precedent is in that config's own comments: a variant once dropped `CGROUP_BPF`
+and recorded that "docker starts and runs". Docker started, containers did not,
+because runc calls `bpf_prog_query(BPF_CGROUP_DEVICE)` on every create. This gate
+would have caught that without running dockerd.
+
 The boot log names the mode, so the gate is checkable rather than assumed
 (`arch/um/os-Linux/start_up.c`):
 
@@ -136,6 +174,9 @@ fp-ptrace    FPTORTURE_OK
 fp-seccomp   Userspace mode: SECCOMP + FPTORTURE_OK
 g3-noaslr    noaslr_preload_active + GATE3 ok ...
 fp-noaslr    noaslr_preload_active + FPTORTURE_OK
+g5-hostfs    GATE5 ok host_read='hello-from-host' blocks=256
+g7-debian    GATE7 ok gcc=12 GATE7_C_OK threads=4 counter=40000
+docker-prereqs  GATEDOCKER ok symbols=... controllers=...
 ```
 
 (`root=/dev/root` and not `/dev/ubda`: that is what the guest's own
@@ -266,18 +307,23 @@ Two more Termux notes:
 ## Extending the matrix
 
 `harness/loop.sh` lists the full gate matrix the port used
-(`g2mini g2alpine g3 g5 g3noaslr g4 fp fpnoaslr`) with the markers and init
-scripts each one needs. Everything except `g5`, `g7` and `docker` is covered
-above. Still missing, and worth adding in roughly this order:
+(`g2mini g2alpine g3 g5 g3noaslr g4 fp fpnoaslr`). Everything in it is covered
+above except two variations, and three gates below go past it (`g7`, `docker`,
+and the second userspace mode for `fp`):
 
-* **`g5`** -- hostfs: the guest reads a host directory and its writes land on
-  the host filesystem. Needs a host share rather than a guest fixture, so it is
-  a `native.sh` change (`-virtfs`-equivalent is UML's own `hostfs=` argument)
-  plus a check of the file on the host side afterwards.
-* **`g7`** -- `apt install build-essential` in a Debian guest, then build and
-  run something. The most valuable and the least CI-shaped: it needs a Debian
-  image (~1.4 GB) and the gate is slow by construction.
-* **`docker`** -- `config/docker.config`, cgroup v2 and `overlay2`.
+* **`g2alpine`** -- the same initramfs gate with an Alpine-based initramfs
+  instead of the freestanding probe. Cheap to add; `mkinitramfs.sh` would need a
+  second mode that packs a directory instead of a single binary.
+* **`g4`/`fp` on a 16 KB guest** -- `doc/40-page-size.md` describes a whole
+  matrix over guest page size. CI runs 16 KB (the default) on a 4 KB host;
+  a 4 KB guest is a different build and cannot boot on a 16 KB host at all.
+* **`dockerd` itself**, for the reason given above.
+
+The original `init` scripts and rootfs images for those gates lived in the
+repository's sibling directories, outside the kernel tree, and are not part of
+this snapshot. `guestinit`, `gate3-init`, `gate4-init`, `gate5-init`,
+`gate7-init` and `docker-init` replace them; `mkrootfs.sh` is the tool for the
+ones that need a root filesystem.
 
 The original `init` scripts and rootfs images for those gates lived in the
 repository's sibling directories, outside the kernel tree, and are not part of

@@ -188,19 +188,21 @@ TCG, no ssh staging. `harness/native.sh` is `boot.sh`'s verdict logic with the
 VM removed.
 
 The gate is the marker string in the boot log plus an independent
-`BUG:`/`WARNING:` scan. The matrix runs nine gates: an initramfs whose `/init`
-is a freestanding probe, in the built-in ptrace default, with `seccomp=on`, and
-with the `nosysemu` cancellation fallback that pre-5.3 arm64 kernels take; a
-real Alpine ext4 root filesystem from `ubd0`, which is the one that exercises
-the guest VFS, the block device and `fork`/`exec`; 2000 sequential and 64
-concurrent `fork`/`exec` from the same image; the FP/SIMD torture in both
-userspace modes, which is what covers state outside the GPR set; and two of
-those gates again under an `LD_PRELOAD` shim that makes `personality()` fail,
-i.e. an Android host. See **[tools/um-arm64/CI.md](tools/um-arm64/CI.md)** for
-the pipeline, the ccache contract, the four bugs the pipeline found, and how to
-run the same gates on any arm64 Linux or on Termux (where `stub_exe=` is
-required, because Android's `untrusted_app` domain refuses `execveat` on a
-memfd).
+`BUG:`/`WARNING:` scan, and several gates add a check on the *host* side of the
+boundary they test. The matrix runs twelve gates: an initramfs whose `/init` is a
+freestanding probe, in the built-in ptrace default, with `seccomp=on`, and with
+the `nosysemu` cancellation fallback that pre-5.3 arm64 kernels take; a real
+Alpine ext4 root filesystem from `ubd0` (guest VFS, block device, `fork`/`exec`);
+2000 sequential and 64 concurrent `fork`/`exec`; hostfs, verified by the file the
+guest wrote being readable on the host; the FP/SIMD torture in both userspace
+modes; two of those gates again under an `LD_PRELOAD` shim that makes
+`personality()` fail, i.e. an Android host; a Debian image where the guest's own
+gcc compiles a libm-and-pthreads program that checks itself; and the docker
+prerequisites on a kernel built with `config/docker.config`. See
+**[tools/um-arm64/CI.md](tools/um-arm64/CI.md)** for the pipeline, the ccache
+contract, the bugs the pipeline found, and how to run the same gates on any arm64
+Linux or on Termux (where `stub_exe=` is required, because Android's
+`untrusted_app` domain refuses `execveat` on a memfd).
 
 ## Benchmarks
 

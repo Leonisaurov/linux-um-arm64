@@ -39,6 +39,14 @@ INIT=${INIT:-/bin/sh}
 STUB_EXE=${STUB_EXE:-}
 PRELOAD=${PRELOAD:-}
 PRELOAD_MARKER=${PRELOAD_MARKER:-}
+# HOSTFS is a directory on this machine that the guest will mount through UML's
+# hostfs. The path travels in the kernel command line, not inside the guest
+# image: an image that carries its own host path stops working the moment it
+# moves to another machine, which is exactly what happened to gate 5 in the
+# original repository.
+HOSTFS=${HOSTFS:-}
+HOSTFS_CHECK=${HOSTFS_CHECK:-}
+HOSTFS_VALUE=${HOSTFS_VALUE:-}
 CON=${CON:-null}
 CON0=${CON0:-null,fd:1}
 
@@ -93,6 +101,19 @@ CMDLINE="mem=$MEM panic=-1 init=$INIT con=$CON con0=$CON0 $EXTRA_ARGS"
 [ -n "$STUB_EXE" ] && CMDLINE="stub_exe=$STUB_EXE $CMDLINE"
 [ -n "$INITRD" ] && CMDLINE="initrd=$INITRD $CMDLINE"
 [ -n "$UBD0" ] && CMDLINE="ubd0=$UBD0 root=/dev/ubda $CMDLINE"
+if [ -n "$HOSTFS" ]; then
+    mkdir -p "$HOSTFS"
+    [ -d "$HOSTFS" ] || { echo "native.sh: HOSTFS=$HOSTFS is not a directory" >&2; exit 2; }
+    # hostfs= both sets the default root and *confines* every hostfs mount to
+    # that tree, which is what makes it safe to hand the guest a directory.
+    CMDLINE="hostfs=$HOSTFS $CMDLINE"
+    # The share is a declared input, not whatever the last run left behind: a
+    # gate that silently reads nothing is worse than one that fails. The
+    # previous run's output is removed so the host-side check can only be
+    # satisfied by this run.
+    printf 'hello-from-host\n' > "$HOSTFS/from-host.txt"
+    rm -f "$HOSTFS/from-guest.txt"
+fi
 printf '%s\n' "$CMDLINE" > "$OUT/cmdline"
 
 log "gate=$GATE timeout=${TIMEOUT}s marker='$MARKER'"
@@ -130,6 +151,19 @@ KBUGS=$(awk '{n += $1} END {print n+0}' "$OUT/kernel-bugs.txt")
 GUESTFAIL=$(grep -acE '^GATE[A-Z0-9_]*_FAIL' "$OUT/boot.log" 2>/dev/null || true)
 GUESTFAIL=${GUESTFAIL:-0}
 
+# hostfs is a bridge to *this* filesystem, so the only proof it worked is on this
+# side of it: the guest's write has to be readable here, as a file the guest
+# could not have created any other way.
+HOSTFS_MISSING=0
+if [ -n "$HOSTFS_CHECK" ]; then
+    if [ ! -s "$HOSTFS/$HOSTFS_CHECK" ]; then
+        HOSTFS_MISSING=1
+    elif [ -n "$HOSTFS_VALUE" ] && \
+         [ "$(cat "$HOSTFS/$HOSTFS_CHECK")" != "$HOSTFS_VALUE" ]; then
+        HOSTFS_MISSING=2
+    fi
+fi
+
 # A gate configured with a preload is only testing what it claims if the
 # library actually loaded. A wrong path, a wrong ABI or a refused load all fail
 # silently, and the gate would pass while exercising an ordinary host, so the
@@ -143,6 +177,8 @@ fi
 # --- verdict ----------------------------------------------------------------
 if [ "$PRELOAD_MISSING" = 1 ]; then
     VERDICT=PRELOAD_FAIL
+elif [ "$HOSTFS_MISSING" != 0 ]; then
+    VERDICT=HOSTFS_FAIL
 elif grep -qF "$MARKER" "$OUT/boot.log" 2>/dev/null; then
     if [ "$KBUGS" -gt 0 ]; then VERDICT=BUG; else VERDICT=PASS; fi
 elif [ "$GUESTFAIL" -gt 0 ]; then
@@ -184,6 +220,9 @@ esac
     echo "preload=${PRELOAD:-none}"
     echo "preload_marker=${PRELOAD_MARKER:-none}"
     echo "preload_missing=$PRELOAD_MISSING"
+    echo "hostfs=${HOSTFS:-none}"
+    echo "hostfs_check=${HOSTFS_CHECK:-none}"
+    echo "hostfs_missing=$HOSTFS_MISSING"
     echo "boot_log_lines=$(wc -l < "$OUT/boot.log" 2>/dev/null || echo 0)"
     echo "kernel_bugs=$KBUGS"
     echo "guest_fail=$GUESTFAIL"

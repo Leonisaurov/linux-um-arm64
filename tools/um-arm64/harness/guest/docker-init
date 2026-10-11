@@ -1,0 +1,103 @@
+#!/bin/sh
+# Gate: what Docker needs from the kernel, checked by the guest on itself.
+#
+# This is not `dockerd`. Running dockerd needs a userland with containerd, runc
+# and an image, and a network to pull one over, none of which CI can provide.
+# What CI can do is build the kernel with config/docker.config and then have the
+# guest verify the features that file exists for -- which is where the port
+# actually went wrong.
+#
+# The precedent is in that config's own comments: a variant once dropped
+# CGROUP_BPF on the theory that it only cost the device controller, and recorded
+# that "docker starts and runs". Docker started; containers did not, because
+# runc calls bpf_prog_query(BPF_CGROUP_DEVICE) while setting up every container
+# and the create failed outright. A guest check like this one would have caught
+# it without running dockerd at all.
+#
+# So the checks below are the prerequisites, named one per failure, and the
+# config symbols are read from the *running* kernel through /proc/config.gz
+# rather than trusted from the build host.
+#
+# Run as:  init=/docker-init ubd0=debian.ext4 root=/dev/ubda rw
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+export PATH
+
+fail() {
+	echo "GATEDOCKER_FAIL: $*"
+	exit 1
+}
+
+mkdir -p /proc /sys /dev /tmp 2>/dev/null
+mount -t proc     proc     /proc 2>/dev/null
+mount -t sysfs    sysfs    /sys  2>/dev/null
+mount -t devtmpfs devtmpfs /dev  2>/dev/null
+mount -t tmpfs    tmpfs    /tmp  2>/dev/null
+
+[ -r /proc/self/stat ] || fail "procfs is not mounted"
+
+# --- 1. the symbols config/docker.config exists for -------------------------
+zcat /proc/config.gz > /tmp/kconfig 2>/dev/null || \
+	fail "no /proc/config.gz (CONFIG_IKCONFIG_PROC)"
+
+for sym in \
+	CONFIG_NAMESPACES CONFIG_NET_NS CONFIG_PID_NS CONFIG_IPC_NS CONFIG_UTS_NS \
+	CONFIG_USER_NS CONFIG_CGROUPS CONFIG_CGROUP_DEVICE CONFIG_CGROUP_FREEZER \
+	CONFIG_CGROUP_PIDS CONFIG_MEMCG CONFIG_BLK_CGROUP CONFIG_KEYS \
+	CONFIG_OVERLAY_FS CONFIG_VETH CONFIG_BRIDGE CONFIG_NETFILTER \
+	CONFIG_NF_NAT CONFIG_NF_TABLES CONFIG_NF_TABLES_IPV4 CONFIG_NFT_NAT \
+	CONFIG_NFT_COMPAT CONFIG_SECCOMP CONFIG_SECCOMP_FILTER CONFIG_POSIX_MQUEUE \
+	CONFIG_BPF_SYSCALL CONFIG_CGROUP_BPF CONFIG_IPV6; do
+	grep -q "^${sym}=y" /tmp/kconfig || fail "$sym is not =y in the running kernel"
+done
+
+# --- 2. cgroup v2, which is the only hierarchy docker uses now --------------
+mkdir -p /sys/fs/cgroup
+mount -t cgroup2 none /sys/fs/cgroup || fail "cannot mount cgroup2"
+[ -r /sys/fs/cgroup/cgroup.controllers ] || fail "cgroup2 has no cgroup.controllers"
+grep -qw memory /sys/fs/cgroup/cgroup.controllers || \
+	fail "the memory controller is not available (CONFIG_MEMCG)"
+grep -qw pids /sys/fs/cgroup/cgroup.controllers || fail "the pids controller is missing"
+
+# --- 3. overlay2, which is the storage driver docker picks ------------------
+mkdir -p /tmp/ovl/lower /tmp/ovl/upper /tmp/ovl/work /tmp/ovl/merged
+echo overlay-works > /tmp/ovl/lower/file
+mount -t overlay overlay \
+	-o lowerdir=/tmp/ovl/lower,upperdir=/tmp/ovl/upper,workdir=/tmp/ovl/work \
+	/tmp/ovl/merged || fail "cannot mount overlayfs (CONFIG_OVERLAY_FS)"
+[ "$(cat /tmp/ovl/merged/file)" = overlay-works ] || fail "overlay read is wrong"
+echo from-guest > /tmp/ovl/merged/new || fail "overlay write failed"
+[ -f /tmp/ovl/upper/new ] || fail "overlay write did not land in upperdir"
+# A whiteout in the merged view is what deleting a file through a container
+# layer does, and it is the operation a naive overlay port gets wrong.
+rm /tmp/ovl/merged/file || fail "cannot delete through overlayfs"
+[ -e /tmp/ovl/merged/file ] && fail "the deleted file is still visible"
+
+# --- 4. namespaces, which is what isolates a container ----------------------
+unshare -m -p -f -u -i -n true || \
+	fail "unshare of mount/pid/uts/ipc/net failed"
+unshare -U true || fail "unshare of a user namespace failed (CONFIG_USER_NS)"
+
+# --- 5. container networking: a veth pair into a bridge ---------------------
+ip link add veth0 type veth peer name veth1 || \
+	fail "cannot create a veth pair (CONFIG_VETH)"
+ip link add br0 type bridge || fail "cannot create a bridge (CONFIG_BRIDGE)"
+ip link set veth0 master br0 || fail "cannot enslave veth0 to br0"
+ip link set br0 up || fail "cannot bring up the bridge"
+ip link del br0 || fail "cannot delete the bridge"
+
+# --- 6. nftables, which is what Debian's iptables-nft speaks ----------------
+if command -v nft >/dev/null 2>&1; then
+	nft add table ip nat || fail "nft cannot create an ip nat table"
+	nft add chain ip nat DOCKER '{ type nat hook prerouting priority -100; }' || \
+		fail "nft cannot add a nat chain (CONFIG_NFT_NAT)"
+	nft delete table ip nat || fail "nft cannot delete the table it created"
+fi
+
+echo "GATEDOCKER ok symbols=$(grep -c '^CONFIG_.*=y' /tmp/kconfig) controllers=$(cat /sys/fs/cgroup/cgroup.controllers)"
+echo "UMARM_BOOT_OK"
+
+poweroff -f
+
+sleep 5
+exit 0

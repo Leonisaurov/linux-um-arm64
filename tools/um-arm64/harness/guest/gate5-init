@@ -1,0 +1,77 @@
+#!/bin/sh
+# Gate 5: hostfs, the bridge between the guest and this machine's filesystem.
+#
+# hostfs is not a block device: every guest open, read, write and rename becomes
+# a host syscall against a real path, and that path is where the port's uaccess
+# and COW assumptions get tested against something that is not a page cache the
+# guest owns. The original gate 5 was "reads a host file; the guest's
+# 262144-byte write lands on the host fs", and the second half is the part that
+# matters -- a write that the guest believes succeeded and the host never saw is
+# the failure this gate exists for.
+#
+# The share directory arrives as hostfs= on the kernel command line, which both
+# sets the default root and confines every hostfs mount to that tree. native.sh
+# seeds from-host.txt and checks from-guest.txt on the host afterwards, so the
+# verdict does not rest on the guest's own word.
+#
+# Run as:  init=/gate5-init ubd0=alpine.ext4 root=/dev/ubda rw hostfs=<dir>
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+export PATH
+
+fail() {
+	echo "GATEG5_FAIL: $*"
+	exit 1
+}
+
+mkdir -p /proc /sys /dev /tmp /mnt/host 2>/dev/null
+mount -t proc     proc     /proc 2>/dev/null
+mount -t sysfs    sysfs    /sys  2>/dev/null
+mount -t devtmpfs devtmpfs /dev  2>/dev/null
+mount -t tmpfs    tmpfs    /tmp  2>/dev/null
+
+[ -r /proc/self/stat ] || fail "procfs is not mounted"
+
+mount -t hostfs hostfs /mnt/host || fail "mount -t hostfs"
+
+# Read: a file native.sh wrote on the host before the boot.
+[ -f /mnt/host/from-host.txt ] || fail "from-host.txt is not visible through hostfs"
+host_content=$(cat /mnt/host/from-host.txt)
+[ "$host_content" = hello-from-host ] || fail "from-host.txt contains '$host_content'"
+
+# Write: the compared half of the gate. 256 KiB rather than a few bytes, because
+# the original gate used that size and a short write is the interesting failure.
+i=0
+while [ "$i" -lt 256 ]; do
+	printf '%s\n' "umarm-guest-was-here block $i of 256, padded to one kilobyte" \
+		"................................................................" \
+		"................................................................" \
+		"................................................................" \
+		"................................................................" \
+		"................................................................" \
+		"................................................................" \
+		"................................................................" \
+		"................................................................" \
+		"................................................................" \
+		"................................................................" \
+		"................................................................" \
+		>> /mnt/host/from-guest.txt || fail "write to hostfs failed at block $i"
+	i=$((i + 1))
+done
+
+# Read it back through hostfs, so a write that went to a cached copy and never
+# reached the host is caught here rather than only on the host side.
+head -1 /mnt/host/from-guest.txt | grep -q "block 0 of 256" || \
+	fail "from-guest.txt does not read back correctly"
+
+# A rename, which is the path doc/30-syscall-budget.md singles out: hostfs
+# reaches renameat2() on the host, and a sandbox that omits it breaks `mv`.
+mv /mnt/host/from-guest.txt /mnt/host/renamed-guest.txt || fail "rename on hostfs"
+
+echo "GATE5 ok host_read='$host_content' blocks=$i"
+echo "UMARM_BOOT_OK"
+
+poweroff -f
+
+sleep 5
+exit 0
