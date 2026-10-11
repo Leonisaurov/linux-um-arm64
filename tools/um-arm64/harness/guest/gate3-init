@@ -19,21 +19,21 @@ fail() {
 	exit 1
 }
 
-# Mount only what is not already mounted: the kernel mounts devtmpfs itself
-# (CONFIG_DEVTMPFS_MOUNT=y), and a second mount of the same type on the same
-# point is EBUSY, which would fail the gate for a reason that is not a bug.
-maybe_mount() {
-	[ -r /proc/mounts ] || return 0
-	grep -qs " $2 " /proc/mounts && return 0
-	mount -t "$1" "$1" "$2" || fail "mount $2 ($1)"
-}
+# Mount the pseudo-filesystems, then check the end state rather than the exit
+# status of each mount. The kernel already mounts devtmpfs itself
+# (CONFIG_DEVTMPFS_MOUNT=y), so a second mount of the same type on the same
+# point fails EBUSY -- which is not an error, and checking /proc/mounts first is
+# not possible before /proc exists, which is the whole point of this block.
+mkdir -p /proc /sys /dev /tmp 2>/dev/null
+mount -t proc     proc     /proc 2>/dev/null
+mount -t sysfs    sysfs    /sys  2>/dev/null
+mount -t devtmpfs devtmpfs /dev  2>/dev/null
+mount -t tmpfs    tmpfs    /tmp  2>/dev/null
 
-maybe_mount proc /proc
-maybe_mount sysfs /sys
-maybe_mount devtmpfs /dev
-maybe_mount tmpfs /tmp
-
-[ -r /proc/mounts ] || fail "procfs is not mounted"
+[ -r /proc/self/stat ] || fail "procfs is not mounted"
+[ -d /sys/kernel ]     || fail "sysfs is not mounted"
+[ -c /dev/null ]       || fail "devtmpfs is not mounted"
+[ -w /tmp ]            || fail "/tmp is not writable"
 [ "$(uname -m)" = aarch64 ] || fail "uname -m=$(uname -m)"
 
 # The root must be the block device, not an initramfs or a tmpfs: this is what

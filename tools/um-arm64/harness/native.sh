@@ -111,9 +111,19 @@ grep -aE '^(BUG:|WARNING:|Oops|INFO: rcu|INFO: task .* blocked|Unable to handle 
      "$OUT/boot.log" 2>/dev/null | tr -d '\r' | sort | uniq -c | sort -rn > "$OUT/kernel-bugs.txt"
 KBUGS=$(awk '{n += $1} END {print n+0}' "$OUT/kernel-bugs.txt")
 
+# A gate's own init reporting a failed check is the most specific diagnosis
+# available, and it is a guest-level verdict: the kernel booted, the root
+# filesystem mounted, and then the fixture decided the port was wrong. Without
+# this the run shows up as SIGNAL (init exiting is a panic under panic=-1) and
+# the actual reason is only in the log.
+GUESTFAIL=$(grep -acE '^GATE[A-Z0-9_]*_FAIL' "$OUT/boot.log" 2>/dev/null || true)
+GUESTFAIL=${GUESTFAIL:-0}
+
 # --- verdict ----------------------------------------------------------------
 if grep -qF "$MARKER" "$OUT/boot.log" 2>/dev/null; then
     if [ "$KBUGS" -gt 0 ]; then VERDICT=BUG; else VERDICT=PASS; fi
+elif [ "$GUESTFAIL" -gt 0 ]; then
+    VERDICT=GUEST_FAIL
 elif [ "$RC" = "137" ] || [ "$RC" = "124" ]; then
     VERDICT=HANG
 elif grep -qE "Kernel panic|BUG:|Oops" "$OUT/boot.log" 2>/dev/null; then
@@ -150,6 +160,7 @@ esac
     echo "cmdline=$CMDLINE"
     echo "boot_log_lines=$(wc -l < "$OUT/boot.log" 2>/dev/null || echo 0)"
     echo "kernel_bugs=$KBUGS"
+    echo "guest_fail=$GUESTFAIL"
     echo "bin_md5=$(md5sum "$OUT/linux" 2>/dev/null | cut -d' ' -f1)"
     echo "host=$(uname -srm)"
 } > "$OUT/result.txt"
