@@ -20,6 +20,7 @@ DEST=${DEST:-/data/local/tmp/umdebian}
 KERNEL=${KERNEL:-$HERE/linux-um-16k}
 IMAGE=${IMAGE:-$HERE/debian.ext4}
 LAUNCHER=${LAUNCHER:-$HERE/deb}
+STUB=${STUB:-$HERE/stub_exe}
 
 command -v "${ADB%% *}" >/dev/null 2>&1 || {
 	echo "install.sh: no '${ADB%% *}' in PATH" >&2
@@ -75,6 +76,15 @@ $ADB shell mkdir -p "$DEST"
 $ADB push "$KERNEL" "$DEST/linux-um"
 $ADB push "$LAUNCHER" "$DEST/deb"
 $ADB shell chmod 755 "$DEST/linux-um" "$DEST/deb"
+
+# The stub is optional and only matters on an Android host, where execveat() on a
+# memfd is refused: UML then has to exec a file, and this is it. The launcher
+# picks it up from its own directory.
+if [ -f "$STUB" ]; then
+	$ADB push "$STUB" "$DEST/stub_exe"
+	$ADB shell chmod 755 "$DEST/stub_exe"
+	echo "install.sh: pushed stub_exe (needed where a memfd cannot be exec'd)"
+fi
 
 # The image is ~1.4 GB on disk and pushing it raw takes noticeably longer than
 # compressing it does, so it goes over gzipped. gzip and not zstd: toybox ships

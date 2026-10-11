@@ -13,9 +13,10 @@ new mounts, no `CLONE_NEWUSER`. Deleting the directory removes it completely.
     ./install.sh
 
 Pushes three files to `/data/local/tmp/umdebian`: the kernel, the Debian image
-(~1.4 GB on disk, gzipped in transit), and the launcher. Then it runs one command
-on the device and checks the answer, because three successful `adb push`es are
-not evidence that anything boots.
+(~1.4 GB on disk, gzipped in transit), and the launcher -- plus `stub_exe` when
+you have one next to the kernel, which on a phone you do need (see the notes).
+Then it runs one command on the device and checks the answer, because three
+successful `adb push`es are not evidence that anything boots.
 
     KERNEL=./linux-um-16k ./install.sh                # which kernel to ship
     NO_COMPRESS=1 ./install.sh                        # push the image raw
@@ -83,6 +84,15 @@ cannot tell from a guest still working.
   (some Android 15+ hardware) use the 16 KiB build instead. `install.sh` checks
   and refuses rather than leaving you with a hang.
 * Exiting the shell powers the kernel down and returns you to Android.
+* **`stub_exe`.** UML normally writes its stub into a memfd and `execveat()`s it,
+  and an Android shell or app domain refuses that: the kernel then exits having
+  printed nothing at all, which reads like a broken kernel and is not. Executing
+  a *file* in your own data directory is allowed, so when a `stub_exe` sits next
+  to the kernel the launcher passes it automatically and `install.sh` pushes it.
+* Guest networking is on by default and is two extra processes: `umnet`
+  reframes between UML's vector transport and `passt`, a userspace TCP/IP stack.
+  Neither needs root, a tap device or a user namespace. Set `UMDEB_NET=0` to run
+  without either, which also makes the launcher's return a little earlier.
 
 ## Why this works at all on an old phone
 

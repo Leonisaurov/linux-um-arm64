@@ -30,6 +30,7 @@ share removed.
 | job | runner | what it does |
 | --- | --- | --- |
 | `build` | `ubuntu-24.04-arm` | `ci-build.sh` builds `ARCH=um SUBARCH=arm64 LLVM=1` twice -- `arm64_defconfig`, and the same tree with `config/docker.config` merged -- and emits both kernels, the freestanding `stub_exe`, the exact `.config`s, the Alpine root filesystem, and the gate-2 fixture |
+| `net-helpers` | `ubuntu-24.04-arm` | builds `umnet` and gates it with `ci-umnet.sh`: no kernel, no passt and no root needed |
 | `boot` (matrix) | `ubuntu-24.04-arm` | downloads the artifact and runs `native.sh` for each gate, booting whichever kernel that gate names |
 | `umdebian` | `ubuntu-24.04-arm` | builds a Debian root filesystem, assembles `dist/umdebian`, and drives the shipped launcher through its documented contract with `ci-umdebian.sh` |
 
@@ -280,6 +281,29 @@ Each of these was invisible to the port's original machine and immediate here:
 4. **`runner.temp` is not available in the job-level `env:` context.** A
    workflow using it there does not fail with a syntax error -- it fails in 0s
    with "This run likely failed because of a workflow file issue".
+
+5. **`umnet` could not tell that the kernel had exited.** The UML side of its
+   pump is an `AF_UNIX SOCK_DGRAM` socketpair, and closing the peer of a datagram
+   socketpair produces no `POLLHUP` and no `EOF`; `poll()` on it blocks forever.
+   So when the guest halted, UML exited, and `umnet` stayed in `poll()` with the
+   kernel as an unreaped zombie. The kernel was fine and the port was fine --
+   what was broken was the ability of anything *waiting* on the launcher to
+   find out that the run had finished. On a phone the shipped `./deb` printed
+   the command's answer and then never returned: a run that had completed,
+   looking exactly like one that had hung.
+
+   Found by running the artifact rather than the kernel, which is why
+   `net-helpers` (needs no kernel, no passt, no root) and the `umdebian` job
+   exist. The fix is a `SIGCHLD` self-pipe in the pump's `poll()` set; the gate
+   asserts the elapsed time, and the old binary hangs against it in 15s.
+
+   The same file's exit-status half had already been fixed for the opposite
+   reason -- it used `WNOHANG` with a discarded status and an unconditional
+   `return 0`, so a kernel killed by a signal, a panic, and a kernel that never
+   started all reached the caller as "exited, status 0". Inside an Android app,
+   where a sandbox can kill the process outright and there is no shell to ask,
+   that is the difference between a diagnosis and a guess. The gate covers that
+   too: `kernel-status` requires status 7 to arrive as 7.
 
 ## Running the same gates locally
 

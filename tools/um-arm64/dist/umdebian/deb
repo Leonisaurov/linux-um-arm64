@@ -26,6 +26,7 @@ UMNET=./umnet
 PASST=./passt
 IMAGE=${UMDEB_IMAGE:-debian.ext4}
 SHARE="$PWD/share"
+STUB=./stub_exe
 
 for f in "$KERNEL" "$IMAGE"; do
 	[ -e "$f" ] || { echo "deb: missing $f (run install.sh first)" >&2; exit 2; }
@@ -33,10 +34,19 @@ done
 chmod 755 "$KERNEL" 2>/dev/null
 mkdir -p "$SHARE" || exit 2
 
+# UML normally writes its stub into a memfd and execveat()s it. An Android shell
+# domain refuses that, and an app's domain may too; executing a file in the app's
+# own data directory is allowed. So when a stub_exe is sitting next to the
+# kernel, use it. There is nothing to lose on a host where the memfd would have
+# worked, and the alternative is a failure with no symptom at all -- the kernel
+# simply exits, having printed nothing.
+STUB_ARG=""
+[ -x "$STUB" ] && STUB_ARG="stub_exe=$PWD/stub_exe"
+
 VERBOSE=0
 if [ "$1" = "-v" ]; then VERBOSE=1; shift; fi
 
-COMMON="mem=$MEM ubd0=$IMAGE root=/dev/ubda rw init=/umarm-init umarm.share=$SHARE panic=-1 con=null seccomp=auto"
+COMMON="mem=$MEM ubd0=$IMAGE root=/dev/ubda rw init=/umarm-init umarm.share=$SHARE panic=-1 con=null seccomp=auto ${STUB_ARG:-}"
 
 # Two things make this several times faster, and both are measured rather than
 # assumed (see doc/80-performance.md):

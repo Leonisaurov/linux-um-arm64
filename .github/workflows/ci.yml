@@ -131,6 +131,31 @@ jobs:
   # documents -- a command in, its output out, its status propagated, the host
   # share both ways, and a sentence instead of a stack trace when the image is
   # already in use. It needs its own Debian image because the guest writes to it.
+  # The kernel gates cannot reach the networking helpers: the guest has no
+  # network, and the bug this one exists for is not about packets anyway. It
+  # needs no kernel, no passt and no root, so it runs in parallel with the rest.
+  net-helpers:
+    name: networking helpers (umnet)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify umnet
+        run: bash tools/um-arm64/harness/ci-umnet.sh
+
+      - name: Step summary
+        if: always()
+        run: |
+          {
+            echo "### networking helpers (umnet)"
+            echo '```'
+            cat umnet-ci/result.txt 2>/dev/null || echo "no result.txt"
+            echo '```'
+            cat umnet-ci/checks.txt 2>/dev/null || true
+          } >> "$GITHUB_STEP_SUMMARY"
+
   umdebian:
     name: umdebian (shipped artifact)
     needs: build

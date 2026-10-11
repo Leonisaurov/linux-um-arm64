@@ -55,6 +55,32 @@
 static pid_t passt_pid;
 static int verbose;			/* --verbose: log every frame both ways */
 
+/*
+ * The UML side of the pump is an AF_UNIX SOCK_DGRAM socketpair, and that is the
+ * one thing the pump cannot be told about: closing the peer of a datagram
+ * socketpair produces no POLLHUP and no EOF, so a poll() on it blocks forever
+ * after the kernel has exited. Measured, not theorised -- the guest halts, UML
+ * becomes a zombie in this process's child list, and umnet sits in do_sys_poll
+ * for as long as anyone cares to watch. Anything waiting on umnet then waits
+ * too: on a phone that is `./deb uname -a` printing its answer and never
+ * returning, a run that finished looking exactly like one that hung.
+ *
+ * So a child exiting has to arrive by another route. SIGCHLD writes one byte to
+ * a pipe that the pump polls alongside the two sockets -- the standard
+ * self-pipe, and the reason it is needed here is exactly the sentence above.
+ * The pipe is created before either fork, or the handler has nothing to write
+ * to.
+ */
+static int sigchld_pipe[2] = { -1, -1 };
+
+static void sigchld_handler(int sig)
+{
+	unsigned char b = 0;
+
+	(void)sig;
+	(void)!write(sigchld_pipe[1], &b, 1);
+}
+
 static void reap(int sig)
 {
 	(void)sig;
@@ -108,22 +134,31 @@ static int write_full(int fd, const void *buf, size_t n)
  * what one core can shuffle, and a second thread would only add a way to get
  * the shutdown ordering wrong.
  */
-static void pump(int uml_fd, int passt_fd)
+static void pump(int uml_fd, int passt_fd, int chld_fd)
 {
 	static unsigned char frame[PFX + MAX_FRAME];
-	struct pollfd pfd[2];
+	struct pollfd pfd[3];
 
 	pfd[0].fd = uml_fd;
 	pfd[1].fd = passt_fd;
+	pfd[2].fd = chld_fd;
 
 	for (;;) {
-		pfd[0].events = pfd[1].events = POLLIN;
+		pfd[0].events = pfd[1].events = pfd[2].events = POLLIN;
 
-		if (poll(pfd, 2, -1) < 0) {
+		if (poll(pfd, 3, -1) < 0) {
 			if (errno == EINTR)
 				continue;
 			return;
 		}
+
+		/*
+		 * A child exited, so either the kernel is gone or the link to
+		 * passt is: either way there is nothing left to pump. This is the
+		 * only notification available for the kernel's exit.
+		 */
+		if (pfd[2].revents & POLLIN)
+			return;
 
 		/* guest -> host: datagram in, length-prefixed out */
 		if (pfd[0].revents & POLLIN) {
@@ -248,6 +283,12 @@ int main(int argc, char **argv)
 	signal(SIGINT, reap);
 	signal(SIGTERM, reap);
 
+	if (pipe2(sigchld_pipe, O_CLOEXEC) < 0) {
+		perror("umnet: pipe2");
+		return 1;
+	}
+	signal(SIGCHLD, sigchld_handler);
+
 	passt_pid = fork();
 	if (passt_pid < 0) {
 		perror("umnet: fork");
@@ -352,7 +393,12 @@ int main(int argc, char **argv)
 
 	close(uml_sp[0]);
 
-	pump(uml_sp[1], passt_sp[1]);
+	/*
+	 * The write end is deliberately not closed here -- it is the handler's,
+	 * and the handler runs in this process. O_CLOEXEC keeps it, and the read
+	 * end, out of the two children.
+	 */
+	pump(uml_sp[1], passt_sp[1], sigchld_pipe[0]);
 
 	/*
 	 * The guest is gone or the link broke; take passt with it.
