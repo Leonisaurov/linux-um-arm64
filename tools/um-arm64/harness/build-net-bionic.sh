@@ -141,10 +141,23 @@ check_bin() {
 	echo "$f: has PT_INTERP, not usable in an app" >&2
 	return 1
     fi
-    case "$(file -b "$f")" in
-    *"ARM aarch64"*"statically linked"*"for Android"*)	;;
-    *)	echo "$f: unexpected: $(file -b "$f")" >&2; return 1 ;;
-    esac
+
+    # Built against bionic, which is the whole point of this build -- and
+    # checked through the ELF rather than through file(1)'s opinion of it.
+    # The check used to require "for Android" in file -b's output, which is a
+    # property of the file(1) version: Termux's prints it, Ubuntu's does not,
+    # so the same binary passed here and failed on the runner. What the NDK's
+    # linker actually writes is the .note.android.ident section, and readelf
+    # is the tool that reads it.
+    if ! "$TOOL/llvm-readelf" -h "$f" | grep -q 'Machine:.*AArch64'; then
+	echo "$f: not an aarch64 binary: $(file -b "$f")" >&2
+	return 1
+    fi
+    if ! "$TOOL/llvm-readelf" -n "$f" | grep -q 'Android'; then
+	echo "$f: no Android note, so not a bionic build: $(file -b "$f")" >&2
+	return 1
+    fi
+
     for align in $("$TOOL/llvm-readelf" -l "$f" | awk '$1 == "LOAD" { print $NF }'); do
 	if [ "$((align))" -lt "$PAGE" ]; then
 	    echo "$f: LOAD aligned $align < $PAGE, will not load on a $PAGE-page kernel" >&2
