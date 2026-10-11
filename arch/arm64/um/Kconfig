@@ -1,0 +1,106 @@
+# SPDX-License-Identifier: GPL-2.0
+
+config UML_ARM64
+	def_bool y
+	select ARCH_SUPPORTS_ATOMIC_RMW
+	#
+	# SMP. The subarch pieces it needs are already correct rather than
+	# merely untested: setjmp_aarch64.S saves the AAPCS64 callee-saved set
+	# and nothing thread-local, so a switch_buf built on one CPU thread is
+	# safe to longjmp from another; barrier.h gives real dmb ish rather
+	# than UP stubs; and the two pieces of per-thread state a shared stub
+	# would otherwise lose -- TPIDR_EL0 as its own regset, and the
+	# in-flight syscall number via NT_ARM_SYSTEM_CALL -- are carried in
+	# os-Linux/registers.c.
+	#
+	# NR_CPUS is only a ceiling: the count that is actually brought up is
+	# the ncpus= boot argument, clamped to it. So one binary serves any
+	# host, and a host that cannot do SMP at all (ptrace userspace) boots
+	# on one CPU rather than refusing to boot.
+	select UML_SUBARCH_SUPPORTS_SMP
+	select ARCH_USE_QUEUED_RWLOCKS
+	select ARCH_USE_QUEUED_SPINLOCKS
+	select HAVE_EFFICIENT_UNALIGNED_ACCESS
+	#
+	# Loadable modules. aarch64 modules are RELA, and the relocation
+	# processing is arch/arm64/kernel/module.c reused verbatim -- the same
+	# arrangement x86 UML has used for its own module.c for years
+	# (subarch-$(CONFIG_MODULES) in the Makefile). HAVE_MOD_ARCH_SPECIFIC
+	# goes with it because arm64's struct mod_arch_specific carries the PLT
+	# bookkeeping that module-plts.c fills in.
+	#
+	select MODULES_USE_ELF_RELA
+	select HAVE_MOD_ARCH_SPECIFIC
+	#
+	# The guest's syscall ABI must match what aarch64 userspace was built
+	# against, and that is decided here rather than by arch/arm64/Kconfig,
+	# which is not sourced for ARCH=um.
+	#
+	# CLONE_BACKWARDS makes sys_clone take
+	#	(flags, newsp, parent_tidptr, tls, child_tidptr)
+	# instead of the generic
+	#	(flags, newsp, parent_tidptr, child_tidptr, tls)
+	# i.e. it swaps the last two arguments. Every aarch64 libc passes them in
+	# the CLONE_BACKWARDS order, so without this a guest pthread_create()
+	# hands the kernel its child-tid pointer as the new thread's TPIDR_EL0 and
+	# its TLS pointer as the address to clear on exit: the thread starts with
+	# a garbage thread pointer and, on exit, writes a zero and a futex wake to
+	# whatever the TLS pointer happened to be.
+	#
+	# Nothing in gates 1-5 catches this, because fork() passes neither a tls
+	# value nor a child_tidptr -- it is threads, and therefore glibc, that
+	# make it visible.
+	select CLONE_BACKWARDS
+	#
+	# 16 KB pages, because the port has to run on them: Android 15 and later
+	# ship 16 KB kernels, and a UML guest's PAGE_SIZE cannot be smaller than
+	# its host's -- the guest's pages are host mmap()s, and an mmap smaller
+	# than the host's granularity simply fails. A 4 KB UML therefore cannot
+	# boot at all on a 16 KB host, which makes this a portability
+	# requirement rather than a tuning option.
+	#
+	# The reverse direction is free: a 16 KB guest runs on a 4 KB host, since
+	# each guest page is four host pages.
+	#
+	# 64 KB is deliberately absent. It is not a size Android or any server
+	# target here uses, and offering an untested size is worse than offering
+	# none.
+	select HAVE_PAGE_SIZE_16KB
+	#
+	# Frame pointers, as arch/arm64/Kconfig selects them for real hardware.
+	#
+	# Not a debug preference. UML's stack walker chains through the frame
+	# pointer and falls back to scanning the stack for anything that looks
+	# like a text address; get_frame_pointer() returns 0 outright when
+	# CONFIG_FRAME_POINTER is off (arch/um/include/asm/stacktrace.h), so the
+	# chain never advances, every frame is a guess, and save_stack_trace()
+	# -- which keeps only frames marked reliable -- returns nothing at all.
+	#
+	# Without this the behaviour depends on CONFIG_DEBUG_INFO, because
+	# FRAME_POINTER is "default y if (DEBUG_INFO && UML)" and UML selects
+	# nothing. So backtraces work in a development build and silently stop
+	# working in the size-tuned build someone puts on a phone, which is
+	# precisely where a backtrace is the only debugging tool left.
+	select ARCH_WANT_FRAME_POINTERS
+
+config 64BIT
+	def_bool y
+
+# Defined, not selected: these are per-architecture symbols with no central
+# definition, exactly as arch/x86/um/Kconfig defines GENERIC_HWEIGHT.
+config GENERIC_HWEIGHT
+	def_bool y
+
+# arch/arm64/lib's checksum routines are kernel-only assembly written against
+# the EL1 uaccess model. The generic C implementations in lib/checksum.c are
+# correct and are not on any hot path for a guest whose network device is a
+# host socket.
+config GENERIC_CSUM
+	def_bool y
+
+# Deliberately *not* "config ARM64". Generic code tests CONFIG_ARM64 to mean
+# "running on real arm64 hardware at EL1" -- it gates things like the arm64
+# vDSO, MTE, pointer authentication and errata workarounds, none of which
+# exist for a UML guest, which is an ordinary userspace process. The subarch
+# advertises itself as UML_ARM64 instead, exactly as x86 UML would if it were
+# written today, and selects the individual capabilities it really has.

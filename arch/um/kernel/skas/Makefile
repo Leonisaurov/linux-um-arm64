@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Copyright (C) 2002 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
+#
+
+obj-y := stub.o mmu.o process.o syscall.o uaccess.o \
+	 stub_exe_embed.o
+
+# Stub executable
+
+stub_exe_objs-y := stub_exe.o
+
+stub_exe_objs := $(foreach F,$(stub_exe_objs-y),$(obj)/$F)
+
+# Object file containing the ELF executable
+$(obj)/stub_exe_embed.o: $(src)/stub_exe_embed.S $(obj)/stub_exe
+
+$(obj)/stub_exe.dbg: $(stub_exe_objs) FORCE
+	$(call if_changed,stub_exe)
+
+$(obj)/stub_exe: OBJCOPYFLAGS := -S
+$(obj)/stub_exe: $(obj)/stub_exe.dbg FORCE
+	$(call if_changed,objcopy)
+
+# $(CLANG_FLAGS) supplies --target=, which selects both the code generation and
+# the linker emulation. KBUILD_CFLAGS does not carry it (it lives in
+# KBUILD_CPPFLAGS), so without this clang links the stub with the build
+# machine's default linker and it fails with "file in wrong format" as soon as
+# the host and target architectures differ. Empty under gcc.
+quiet_cmd_stub_exe = STUB_EXE $@
+      cmd_stub_exe = $(CC) -nostdlib -o $@ $(filter --target=%,$(CLANG_FLAGS)) \
+			   $(filter-out $(UM_GPROF_OPT) $(UM_GCOV_OPT),$(KBUILD_CFLAGS)) $(STUB_EXE_LDFLAGS) \
+			   $(filter %.o,$^)
+
+# --no-rosegment: lld gives read-only data its own PT_LOAD, and with -n
+# (nmagic, no page alignment) the two segments end up sharing a page. The
+# kernel maps ET_EXEC segments with MAP_FIXED_NOREPLACE, so the second mmap of
+# that page returns -EEXIST and the exec fails after the point of no return --
+# which surfaces as the *guest* failing to start with -ENOMEM, because
+# start_userspace() cannot exec the stub. Merging rodata into the text segment
+# leaves one loadable segment, which is what -n was written for.
+STUB_EXE_LDFLAGS = -Wl,-n -Wl,--no-rosegment -static
+
+targets += stub_exe.dbg stub_exe $(stub_exe_objs-y)
+
+# end
+
+# stub.o is in the stub, so it can't be built with profiling
+# GCC hardened also auto-enables -fpic, but we need %ebx so it can't work ->
+# disable it
+
+CFLAGS_stub.o := $(CFLAGS_NO_HARDENING)
+CFLAGS_stub_exe.o := $(CFLAGS_NO_HARDENING)
+
+# Clang will call memset() from __builtin_alloca() when stack variable
+# initialization is enabled, which is used in stub_exe.c.
+CFLAGS_stub_exe.o += $(call cc-option, -ftrivial-auto-var-init=uninitialized)
+
+UNPROFILE_OBJS := stub.o stub_exe.o
+KCOV_INSTRUMENT := n
+
+include $(srctree)/arch/um/scripts/Makefile.rules

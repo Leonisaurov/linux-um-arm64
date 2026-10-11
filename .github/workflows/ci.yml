@@ -1,0 +1,173 @@
+name: um-arm64 CI
+
+# Build and boot the arm64 User Mode Linux port on a *native* aarch64 host.
+#
+# The port's own documentation assumed an x86_64 build domain with a
+# qemu-system-aarch64 VM as the run domain, because no arm64 hardware was
+# available. GitHub's `ubuntu-24.04-arm` hosted runner removes that deviation
+# entirely: it is a real arm64 kernel, so `./linux` is an ordinary aarch64
+# process and can be built and booted on the same machine, which is what the
+# port set out to demonstrate. No qemu, no TCG, no ssh staging.
+#
+# The gate verdict is the marker string in the boot log, never the exit status,
+# plus an independent BUG:/WARNING: scan (harness/native.sh).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# One build per ref. A cancelled run must not race a live one for the run domain
+# (they are separate runners, but the cache key churns for no reason).
+concurrency:
+  group: um-arm64-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build (native aarch64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    env:
+      O: ${{ runner.temp }}/umarm-build
+      ART: ${{ runner.temp }}/artifacts
+      CCACHE_DIR: ${{ runner.temp }}/ccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+              /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker system prune -af >/dev/null 2>&1 || true
+          df -h / "$RUNNER_TEMP" || true
+
+      - name: Install toolchain
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+              clang lld llvm bc flex bison libelf-dev libssl-dev cpio zstd ccache
+          clang --version | head -1
+          ld.lld --version | head -1
+          nproc
+
+      # ccache keyed by commit with a stable prefix: a new commit misses the
+      # exact key but restores the most recent cache, which is what makes the
+      # kernel compile incremental. The cache holds only the compiler cache,
+      # never build outputs, so a stale restore cannot splice an old object into
+      # a new binary -- ccache hashes inputs, it does not trust mtimes.
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-um-arm64-${{ github.sha }}
+          restore-keys: |
+            ccache-um-arm64-
+
+      - name: Build kernel + stub
+        run: bash tools/um-arm64/harness/ci-build.sh
+
+      - name: Build initramfs gate fixture
+        run: bash tools/um-arm64/harness/mkinitramfs.sh "$RUNNER_TEMP/initramfs.cpiogz"
+
+      - name: ccache stats
+        if: always()
+        run: ccache --show-stats || true
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: um-arm64-kernel
+          path: |
+            ${{ env.ART }}/linux-um-arm64
+            ${{ env.ART }}/stub_exe
+            ${{ env.ART }}/kernel.config
+            ${{ env.ART }}/build.txt
+            ${{ runner.temp }}/initramfs.cpiogz
+          retention-days: 14
+
+  boot:
+    name: boot gate (${{ matrix.name }}, native aarch64)
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Default path: the phone/desktop configuration, PTRACE_SYSEMU where
+          # the host has it and seccomp for userspace execution.
+          - name: default
+            extra: ""
+          # The port's own switch for the seccomp fast path.
+          - name: seccomp
+            extra: "seccomp=on"
+          # Force the pre-5.3 arm64 fallback: PTRACE_SYSCALL plus a syscall
+          # cancellation through NT_ARM_SYSTEM_CALL. This is the path a 4.19
+          # Android kernel takes, and it is testable everywhere by design.
+          - name: nosysemu
+            extra: "nosysemu"
+    env:
+      ART: ${{ runner.temp }}/run
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download kernel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: um-arm64-kernel
+          path: ${{ runner.temp }}/artifacts
+
+      # UML is the ptrace tracer of its own stub children. yama ptrace_scope=1
+      # (the Ubuntu default) already allows tracing descendants; 0 removes any
+      # doubt. Failure here is not fatal to the run.
+      - name: Relax ptrace scope
+        run: |
+          cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo "no yama"
+          sudo sysctl -w kernel.yama.ptrace_scope=0 || true
+
+      - name: Boot gate
+        env:
+          BIN: ${{ runner.temp }}/artifacts/linux-um-arm64
+          INITRD: ${{ runner.temp }}/artifacts/initramfs.cpiogz
+          GATE: g2-${{ matrix.name }}
+          MARKER: UMARM_GUEST_OK
+          INIT: /init
+          TIMEOUT: "180"
+          MEM: 512M
+          EXTRA_ARGS: ${{ matrix.extra }}
+        run: bash tools/um-arm64/harness/native.sh
+
+      - name: Upload boot log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: um-arm64-boot-${{ matrix.name }}
+          path: ${{ env.ART }}/g2-${{ matrix.name }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Step summary
+        if: always()
+        run: |
+          {
+            echo "### boot gate: ${{ matrix.name }}"
+            echo '```'
+            cat "$ART"/g2-${{ matrix.name }}/result.txt 2>/dev/null || echo "no result.txt"
+            echo '```'
+            if [ -s "$ART"/g2-${{ matrix.name }}/kernel-bugs.txt ]; then
+              echo "#### kernel diagnostics"
+              echo '```'
+              cat "$ART"/g2-${{ matrix.name }}/kernel-bugs.txt
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
