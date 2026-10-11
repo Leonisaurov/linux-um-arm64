@@ -188,6 +188,18 @@ docker-prereqs  GATEDOCKER ok symbols=... controllers=...
 
 ### The Android artifact
 
+This is the one job that runs on an x86_64 runner (`ubuntu-24.04`), and the
+reason is worth recording because everything else here is on `ubuntu-24.04-arm`:
+**Google publishes the NDK for x86_64 hosts only.** There is no
+`android-ndk-rXX-linux.zip` that an aarch64 machine can execute, which is why an
+arm runner fails with `cannot execute binary file: Exec format error` on the
+compiler it just unpacked -- and why an aarch64 host that wants to build this
+locally needs a repacked NDK (`build-bionic.sh` looks for
+`toolchains/llvm/prebuilt/linux-aarch64` and refuses a stock one there rather than
+failing later). Cross-compiling is not a compromise for this job: the target is
+aarch64-android either way, and the port's own bionic binaries were built this
+way.
+
 Everything else here builds the **glibc** variant: that is the run domain, and it
 is what the gates boot. It is also not what runs on a phone. An app process is
 started by zygote with a seccomp filter already installed, and glibc's startup

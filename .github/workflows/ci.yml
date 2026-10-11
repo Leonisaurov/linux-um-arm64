@@ -163,9 +163,16 @@ jobs:
   # glibc binary dies before main() having printed nothing. bionic is the libc
   # that filter was written for, so this job builds the same kernel against the
   # NDK and publishes it with the stub and the launcher it needs.
+  # The one job that does *not* run on an arm runner, and the reason is the NDK:
+  # Google publishes it for x86_64 hosts only (there is no android-ndk-rXX-linux
+  # for aarch64), so an arm64 runner cannot execute the compiler it just
+  # unpacked -- "cannot execute binary file: Exec format error". Cross-compiling
+  # is not a compromise here: the target is what matters, and the target is
+  # aarch64-android either way. This is also how the port's bionic binaries were
+  # built in the first place.
   android:
-    name: android/bionic (aarch64)
-    runs-on: ubuntu-24.04-arm
+    name: android/bionic (cross to aarch64)
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
       # Pinned by version and by the sha1 Google publishes for it, the way the
@@ -206,7 +213,8 @@ jobs:
       # The zip, not the unpacked tree: 663 MB instead of several GB, and the
       # sha1 is checked on every use, so a cache entry is never trusted further
       # than the download it came from. Keyed by version *and* digest, i.e.
-      # content-addressed, so it cannot go stale.
+      # content-addressed, so it cannot go stale. `runner.arch` is X64 here,
+      # which is the point: this cache is only usable from an x86_64 host.
       - name: Restore the NDK archive
         id: ndk-cache
         uses: actions/cache/restore@v4
