@@ -64,10 +64,16 @@ done
 # The port's fixed FP bug was seccomp-specific and showed up as two computations
 # disagreeing, not as a crash, so it is run rather than assumed.
 if [ -x /fptorture ]; then
-	out=$(/fptorture) || fail "fptorture failed: $out"
-	case "$out" in
+	# Through a file and with both descriptors, because fptorture writes with its
+	# own write(2) to a descriptor of its own choosing rather than to stdout: the
+	# first version captured $( ) and read back nothing while the torture passed,
+	# and then failed the gate for the empty string. The criterion is the marker,
+	# not the exit status -- which is this project's own rule, written down, and
+	# the one I broke here.
+	/fptorture > /tmp/fp.out 2>&1 || true
+	case "$(cat /tmp/fp.out 2>/dev/null)" in
 	*FPTORTURE_OK*) ;;
-	*) fail "fptorture said: $out" ;;
+	*) fail "fptorture said: $(cat /tmp/fp.out 2>/dev/null)" ;;
 	esac
 fi
 

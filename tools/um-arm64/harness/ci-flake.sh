@@ -38,7 +38,14 @@ mkdir -p "$OUT" "$HOSTFS"
 TSV="$OUT/results.tsv"
 printf 'iter\tgate\tverdict\trc\tseconds\tartifact\n' > "$TSV"
 
-# name | init | ubd0 | initrd | mem | hostfs | every | timeout
+# name | marker | init | ubd0 | initrd | mem | hostfs | every | timeout
+#
+# The marker is per row and not one string for the whole loop: the fixtures
+# announce themselves differently (the freestanding guestinit prints
+# UMARM_GUEST_OK, the fp torture FPTORTURE_OK), and the first version of this
+# matrix used UMARM_BOOT_OK for all of them -- which reported the initramfs row
+# and the fp row as failures five times each on a run where both were fine. The
+# port's own loop.sh has this column for the same reason.
 #
 # "every" samples the expensive rows. g4 spawns 2000 processes and fp runs ~8500
 # verify iterations; running both on every pass would put the loop past a day,
@@ -46,12 +53,12 @@ printf 'iter\tgate\tverdict\trc\tseconds\tartifact\n' > "$TSV"
 # and teardown flakes live -- run every time, and flake-init runs every time
 # because it is the perturbation and a sampled perturbation is not one.
 MATRIX=(
-"g2mini|/init||initramfs.cpiogz|512M||1|180"
-"g3|/gate3-init|alpine.ext4||512M||1|300"
-"flake|/flake-init|alpine.ext4||512M|yes|1|300"
-"g4|/gate4-init|alpine.ext4||512M||5|900"
-"fp|/fp-init|alpine.ext4||512M||5|900"
-"rss|/rss-init|debian.ext4||512M||5|900"
+"g2mini|UMARM_GUEST_OK|/init||initramfs.cpiogz|512M||1|180"
+"g3|UMARM_BOOT_OK|/gate3-init|alpine.ext4||512M||1|300"
+"flake|UMARM_BOOT_OK|/flake-init|alpine.ext4||512M|yes|1|300"
+"g4|UMARM_BOOT_OK|/gate4-init|alpine.ext4||512M||5|900"
+"fp|FPTORTURE_OK|/fp-init|alpine.ext4||512M||5|900"
+"rss|UMARM_BOOT_OK|/rss-init|debian.ext4||512M||5|900"
 )
 
 BIN="$KERNEL/linux-um-arm64"
@@ -72,7 +79,7 @@ declare -A firstfail
 start=$SECONDS
 for i in $(seq 1 "$N"); do
     for row in "${MATRIX[@]}"; do
-        IFS='|' read -r name init ubd0 initrd mem hf every tmo <<< "$row"
+        IFS='|' read -r name marker init ubd0 initrd mem hf every tmo <<< "$row"
         [ $(( i % ${every:-1} )) -eq 0 ] || continue
         t0=$SECONDS
 
@@ -81,7 +88,7 @@ for i in $(seq 1 "$N"); do
             BIN="$BIN"
             ART="$OUT/run"
             TIMEOUT="$tmo"
-            MARKER="UMARM_BOOT_OK"
+            MARKER="$marker"
             INIT="$init"
             MEM="$mem"
             EXTRA_ARGS="rw"
