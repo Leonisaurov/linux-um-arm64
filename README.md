@@ -31,6 +31,13 @@ things Android otherwise denies it:
 * **The thin edges of the platform.** `dist/umapp` is an Android app that runs
   the same kernel, and `doc/100-usb.md` hands a real RTL8811AU USB dongle to the
   guest over USB/IP, which is how the port got `wlan0` and a scan on a phone.
+  CI builds the APK (`umapp`, on an x86_64 runner because the arm64 runner images
+  install no Android SDK) and checks what a device would: the signature, the
+  aarch64 static binaries inside `lib/arm64-v8a/`, the assets, and the manifest.
+  Two differences from the released app are deliberate and named in
+  `tools/um-arm64/CI.md`: the initramfs it ships is the gate-2 fixture rather
+  than an Alpine one (the tree has no producer for that), and `sockprobe_bionic`
+  has no source in the tree.
 
 What it is **not**: hardware, a second CPU (the guest is uniprocessor), a 32-bit
 compat layer, or an escape from the host. Every guest syscall is a host syscall
