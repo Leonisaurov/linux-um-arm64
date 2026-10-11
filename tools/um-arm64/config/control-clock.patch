@@ -1,0 +1,13 @@
+diff --git a/arch/um/kernel/time.c b/arch/um/kernel/time.c
+index b344a36b4..283fb5112 100644
+--- a/arch/um/kernel/time.c
++++ b/arch/um/kernel/time.c
+@@ -901,7 +901,7 @@ static u64 timer_read(struct clocksource *cs)
+ 		return time_travel_time / TIMER_MULTIPLIER;
+ 	}
+ 
+-	return os_nsecs() / TIMER_MULTIPLIER;
++	return os_nsecs() / TIMER_MULTIPLIER * 2;
+ }
+ 
+ static struct clocksource timer_clocksource = {

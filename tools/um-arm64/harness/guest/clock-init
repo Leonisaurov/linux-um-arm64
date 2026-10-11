@@ -1,0 +1,37 @@
+#!/bin/sh
+# Gate: the *rate* of the guest's clock, which nothing has ever measured.
+#
+# The guest's clock is the host's -- timer_read() divides os_nsecs(), the host's
+# CLOCK_MONOTONIC, by TIMER_MULTIPLIER -- so it cannot drift, and a missing vDSO
+# can only make it slower. What can still be wrong is the plumbing between the
+# two: the clocksource's registration, the multiplier, the tick. A wrong rate
+# there shows up as one guest second lasting something other than one host
+# second, and that is what this measures. clockcheck busy-spins until *its*
+# CLOCK_MONOTONIC advances SECS; the harness measures how long the host took to
+# run the whole thing, and the two must agree. See doc/70-vdso.md.
+#
+# Run as: init=/clock-init ubd0=alpine.ext4 root=/dev/ubda rw
+
+SECS=${CLOCK_SECS:-30}
+
+fail() { echo "GATECLOCK_FAIL: $*"; }
+
+mkdir -p /proc /sys /dev 2>/dev/null
+mount -t proc proc /proc 2>/dev/null
+
+command -v clockcheck >/dev/null 2>&1 || {
+	fail "clockcheck is not in the guest image"
+	exit 1
+}
+
+echo "CLOCKCHECK_BEGIN secs=$SECS"
+clockcheck "$SECS"
+rc=$?
+case "$rc" in
+0) ;;
+*) fail "clockcheck exited $rc" ;;
+esac
+
+echo "UMARM_BOOT_OK clock_secs=$SECS"
+[ -x /umarm-poweroff ] && /umarm-poweroff
+exit 0

@@ -144,6 +144,8 @@ PY
 }
 
 compile_probe "$HERE/probe/fptorture.c" fptorture
+# The clock rate gate: the guest's CLOCK_MONOTONIC against the host's wall time.
+compile_probe "$HERE/probe/clockcheck.c" clockcheck
 
 # e2fsprogs refuses to overwrite an existing filesystem unless forced, and CI
 # reuses $OUT across attempts. The Debian tree carries device nodes and root

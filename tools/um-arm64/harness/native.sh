@@ -62,6 +62,15 @@ HOSTFS_VALUE=${HOSTFS_VALUE:-}
 CON=${CON:-null}
 CON0=${CON0:-null,fd:1}
 
+# The clock gate's two numbers. The guest measures its own CLOCK_MONOTONIC and
+# says so in the boot log; the host measures how long this script took. They must
+# agree: the guest's clock *is* the host's (see doc/70-vdso.md), so the only
+# difference is this script's own boot and shutdown, and a wrong clocksource rate
+# on the guest side makes that difference negative -- a 2x fast guest clock turns
+# a 30 s spin into 15 host seconds.
+CLOCK_SLACK=${CLOCK_SLACK:-}
+T0=$(date +%s.%N)
+
 log() { printf '[native] %s\n' "$*"; }
 
 [ -f "$BIN" ] || { echo "native.sh: no kernel at BIN=$BIN" >&2; exit 2; }
@@ -212,6 +221,23 @@ for want in $REQUIRE; do
     grep -qF "$want" "$OUT/boot.log" 2>/dev/null || REQUIRE_MISSING="$REQUIRE_MISSING $want"
 done
 
+CLOCK_FAIL=""
+CLOCK_GUEST=""
+CLOCK_HOST=""
+if [ -n "$CLOCK_SLACK" ]; then
+    CLOCK_GUEST=$(sed -n 's/.*mono_elapsed=\([0-9.]*\).*/\1/p' "$OUT/boot.log" 2>/dev/null | tail -1)
+    CLOCK_HOST=$(awk -v a="$T0" -v b="$(date +%s.%N)" 'BEGIN{printf "%.3f", b-a}')
+    if [ -z "$CLOCK_GUEST" ]; then
+        CLOCK_FAIL="no mono_elapsed in the boot log"
+    elif ! awk -v g="$CLOCK_GUEST" 'BEGIN{exit !(g > 0)}'; then
+        CLOCK_FAIL="guest reported mono_elapsed=$CLOCK_GUEST"
+    else
+        d=$(awk -v h="$CLOCK_HOST" -v g="$CLOCK_GUEST" 'BEGIN{printf "%.3f", h-g}')
+        awk -v d="$d" -v s="$CLOCK_SLACK" 'BEGIN{exit !(d >= 0 && d < s)}' \
+            || CLOCK_FAIL="host-guest=$d (slack=$CLOCK_SLACK)"
+    fi
+fi
+
 # --- verdict ----------------------------------------------------------------
 if [ "$PRELOAD_MISSING" = 1 ]; then
     VERDICT=PRELOAD_FAIL
@@ -219,6 +245,8 @@ elif [ "$HOSTFS_MISSING" != 0 ]; then
     VERDICT=HOSTFS_FAIL
 elif [ -n "$REQUIRE_MISSING" ]; then
     VERDICT=REQUIRE_FAIL
+elif [ -n "$CLOCK_FAIL" ]; then
+    VERDICT=CLOCK_FAIL
 elif [ "$EXPECT_MISSING" = 1 ]; then
     VERDICT=CONTROL_FAIL
 elif grep -qF "$MARKER" "$OUT/boot.log" 2>/dev/null; then
@@ -271,6 +299,10 @@ esac
     echo "expect_bug_hits=$EXPECT_HITS"
     echo "require=${REQUIRE:-none}"
     echo "require_missing=${REQUIRE_MISSING:-none}"
+    echo "clock_slack=${CLOCK_SLACK:-none}"
+    echo "clock_guest=${CLOCK_GUEST:-none}"
+    echo "clock_host=${CLOCK_HOST:-none}"
+    echo "clock_fail=${CLOCK_FAIL:-none}"
     echo "boot_log_lines=$(wc -l < "$OUT/boot.log" 2>/dev/null || echo 0)"
     echo "kernel_bugs=$KBUGS"
     echo "guest_fail=$GUESTFAIL"

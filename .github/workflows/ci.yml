@@ -135,6 +135,25 @@ jobs:
       # off, so what these gates answer is whether the loader actually works
       # when the host is a userspace process. `make modules` needs the kernel
       # built first, which is why this runs ci-build.sh twice.
+
+      # The clock gate's negative control: timer_read() returns double, so the
+      # guest's clock runs 2x fast and clock-control must go red. ART's basename
+      # is what the boot matrix calls this kernel, so it cannot be "control".
+      - name: Build the control kernel (clock negative control)
+        run: |
+          set -euo pipefail
+          git apply --check tools/um-arm64/config/control-clock.patch
+          git apply tools/um-arm64/config/control-clock.patch
+          trap 'git checkout -- arch/um/kernel/time.c' EXIT
+          export O="$RUNNER_TEMP/umarm-build-control-clock"
+          export ART="$RUNNER_TEMP/artifacts/control-clock"
+          export CCACHE_DIR="$RUNNER_TEMP/ccache"
+          bash tools/um-arm64/harness/ci-build.sh
+
+      # Loadable modules. The code is wired for this subarch and the config is
+      # off, so what these gates answer is whether the loader actually works
+      # when the host is a userspace process. `make modules` needs the kernel
+      # built first, which is why this runs ci-build.sh twice.
       - name: Build kernel (modules config)
         run: |
           set -euo pipefail
@@ -773,6 +792,13 @@ jobs:
           # the runner's pages are larger rather than hanging.
           - { name: rss-4k,      kernel: 4k,      ubd0: debian.ext4, init: /rss-init,           marker: UMARM_BOOT_OK,   timeout: "900", extra: "rw", debian: "yes" }
           - { name: rss-control, kernel: control, ubd0: debian.ext4, init: /rss-init,           marker: UMARM_BOOT_OK,   timeout: "900", extra: "rw", debian: "yes", expect_bug: "Bad rss-counter" }
+          # The clock rate gate. clock-guest must show the guest's CLOCK_MONOTONIC
+          # agreeing with the host's wall time; clock-control is the same kernel
+          # with timer_read() returning double (config/control-clock.patch) and
+          # must *disagree*, which is what makes a green clock-guest mean
+          # something. Neither number had ever been measured on either side.
+          - { name: clock-guest,   kernel: default,       ubd0: alpine.ext4, init: /clock-init, marker: UMARM_BOOT_OK, timeout: "900", extra: "rw", hostfs: "yes", hostfs_check: "", clock_slack: "20" }
+          - { name: clock-control, kernel: control-clock, ubd0: alpine.ext4, init: /clock-init, marker: UMARM_BOOT_OK, timeout: "900", extra: "rw", hostfs: "yes", hostfs_check: "", clock_slack: "20" }
           # --- gate 10: loadable modules, at the three memory sizes that decide
           # which relocation path the loader takes. The module arrives through a
           # hostfs share, so hostfs_check is empty on purpose: there is no file
@@ -870,6 +896,7 @@ jobs:
           # Set only on the negative control, where the diagnostic appearing is
           # the expected result rather than a defect.
           [ -z "${{ matrix.expect_bug }}" ] || export EXPECT_BUG="${{ matrix.expect_bug }}"
+          [ -z "${{ matrix.clock_slack }}" ] || export CLOCK_SLACK="${{ matrix.clock_slack }}"
           if [ "${{ matrix.hostfs }}" = yes ]; then
             export HOSTFS="$RUNNER_TEMP/hostshare"
             export HOSTFS_CHECK="${{ matrix.hostfs_check }}"
