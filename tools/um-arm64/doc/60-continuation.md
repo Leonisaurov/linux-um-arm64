@@ -443,3 +443,45 @@ Sharpening it is a real piece of work, not a tweak: the entry has to be walked
 while the memory behind it is in a state that matters, which means controlling
 reuse rather than just volume. Until then the row stays as what it is, and this
 file says so.
+
+## What is left, in the order I would do it
+
+Written down because the list had grown past what the earlier sections cover, and
+because two of these are cheap while looking expensive.
+
+1. **An Alpine image that can run Docker.** Docker needs a kernel built with
+   `config/docker.config` and nothing else from the guest's side except a
+   `cgroup2` mount; Alpine has `docker` in its own repository and the guest has
+   internet. So: boot the Alpine image (any kernel -- `apk` only needs the
+   network), `apk add docker`, and the install lands in the image because the
+   image is rw and never copied. The payoff is the reason to bother: the working
+   Docker image today is `debian-docker.ext4` at 1.3 GB, and this would be tens
+   to a couple of hundred MB. The image has to be grown from 64 MB first, and
+   `dockerd` started by hand or through `openrc`, since the minirootfs has no
+   init system. Not verified -- the Debian path is the one that has a
+   `Hello from Docker!` transcript.
+2. **A `--docker` mode for `umalpine.sh`.** Four things are done by hand today:
+   pick the `docker` kernel, pick the image, mount `cgroup2`, and point the
+   kernel's interpreter at Termux's glibc (`grun --configure`, i.e. patchelf),
+   because the kernel from CI is glibc-linked and Termux has no glibc. The
+   wrapper already accepts all the pieces; it does not choose them.
+3. **The boot artifacts are 150-300 MB each.** `native.sh` copies the kernel into
+   each run directory and the boot job uploads the whole directory, so 22 gates
+   is roughly 4 GB of artifacts per run, nearly all of it duplicated kernels.
+   This is exactly the shape of the flake artifact that was already fixed (18
+   runs x 90 MB); nobody has looked at the boot job.
+4. **The `list_del` in `init_new_context()` still has no reproducing control.**
+   The injection works and the reachability test is in the matrix, but with the
+   fix reverted the guest survives identically. Sharpening it means controlling
+   reuse of the freed mm's memory rather than the volume of forks -- real work,
+   not a tweak. See the section above.
+5. **The guest vDSO** is decided but not built: `doc/70-vdso.md`. Phase 0 (measure
+   the clock rate) is done and gated; what remains is the choice between building
+   a syscall-stub vDSO for ABI completeness or leaving it, and the README no
+   longer claims anything false either way.
+6. **Untested, named so they are not assumed to work:** `docker compose`,
+   rootless Docker, more than one CPU, daemon state across a guest reboot,
+   `UMALPINE_NET=0`, the 4 KB kernel under the wrapper.
+7. **The `g3-noaslr` transient** is refuted as a leak and explained as a host
+   condition, which means there is nothing to fix unless it recurs. If it does,
+   the verdict now keeps the guest's own explanation instead of saying SIGNAL.
