@@ -23,6 +23,9 @@ ALPINE_BASE=${ALPINE_BASE:-https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/
 ALPINE_TARBALL=alpine-minirootfs-${ALPINE_VERSION}-aarch64.tar.gz
 ALPINE_SHA256=${ALPINE_SHA256:-4ccfb9feda48b4f40fd9aceaf32b61e575d407387589deaabbd77cd9ed51e165}
 
+CC=${CC:-clang}
+TARGET=${TARGET:-aarch64-linux-gnu}
+
 CACHE=${CACHE:-${TMPDIR:-/tmp}/umarm-rootfs-cache}
 mkdir -p "$CACHE"
 
@@ -55,7 +58,33 @@ tar -xzf "$CACHE/$ALPINE_TARBALL" -C "$STAGE"
 
 # Unprivileged builds may not restore ownership from the tarball; the contents
 # are root:root inside the image regardless, which is what matters.
-install -m 0755 "$HERE/guest/gate3-init" "$STAGE/gate3-init"
+#
+# Guest-side files. The gate inits are plain shell and go in as-is; the probes
+# are freestanding binaries (their own _start, raw svc #0), so no guest libc and
+# no dynamic loader are involved and --target alone selects the architecture.
+for f in "$HERE"/guest/*; do
+    install -m 0755 "$f" "$STAGE/$(basename "$f")"
+done
+
+compile_probe() {
+    local src=$1 name=$2
+
+    "$CC" --target="$TARGET" -static -nostdlib -ffreestanding -O1 \
+          -fno-stack-protector -fno-pic -o "$STAGE/$name" "$src"
+
+    # ET_EXEC, not ET_DYN: nothing relocates a PIE in a rootfs whose loader is
+    # the guest's, and a DYN probe would fail in a way that looks like the
+    # kernel faulting on the first instruction.
+    python3 - "$STAGE/$name" <<'PY'
+import struct, sys
+p = sys.argv[1]
+d = open(p, "rb").read(20)
+if d[:4] != b"\x7fELF" or struct.unpack_from("<H", d, 16)[0] != 2:
+    sys.exit(f"{p} is not a static ET_EXEC aarch64 ELF")
+PY
+}
+
+compile_probe "$HERE/probe/fptorture.c" fptorture
 
 # e2fsprogs refuses to overwrite an existing filesystem unless forced, and CI
 # reuses $OUT across attempts.

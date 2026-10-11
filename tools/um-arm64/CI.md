@@ -47,6 +47,8 @@ installed on Termux and is an avoidable moving part.
 | `g2-seccomp` | initramfs | `seccomp=on` | the seccomp fast path; `on` makes a non-functional seccomp a fatal error rather than a silent fallback |
 | `g2-nosysemu` | initramfs | `nosysemu` | `PTRACE_SYSCALL` plus a `NT_ARM_SYSTEM_CALL` cancellation, i.e. what a pre-5.3 arm64 host (a 4.19 Android kernel) does |
 | `g3-alpine` | Alpine ext4 on `ubd0` | `rw` | guest VFS, block device, `fork`/`exec`, process teardown |
+| `fp-ptrace` | Alpine ext4 on `ubd0` | `rw` | FP/SIMD state: all 32 V registers plus FPCR/FPSR, bit-exact |
+| `fp-seccomp` | Alpine ext4 on `ubd0` | `rw seccomp=on` | the same torture on the seccomp path, where the port's fixed FP bug lived |
 
 The `g2` fixture is `harness/probe/guestinit.c` as `/init`: a freestanding
 aarch64 binary with its own `_start`, raw `svc #0` calls, one guest capability
@@ -64,6 +66,20 @@ after every check has passed -- `uname -m`, a pipeline with a checkable result,
 reads and writes through the VFS, the root device really being `/dev/ubda`,
 200 sequential `fork`/`exec`, and 16 concurrent children.
 
+The `fp` fixture is `probe/fptorture.c`, compiled into the same image by
+`mkrootfs.sh` and run by `harness/guest/fp-init`. It is freestanding, so it needs
+no guest libc and no dynamic loader. It exists because gates 1-5 barely touch
+floating point: busybox computes almost nothing, so a bug in the FP save/restore
+path survives all of them and only surfaces under `dpkg` and a compiler, where
+NEON is used continuously -- as "apt occasionally fails with a strange error".
+It covers the three paths that are not the GPR set: the syscall round-trip, the
+task switch, and signal delivery through `mcontext.__reserved[]` in the
+hand-written `arch/arm64/um/signal.c`. The two rows in the matrix above are not
+redundant: the bug the port fixed here was specific to seccomp mode, where the
+guest's FP/SIMD state was never saved or restored across a signal because the
+guard compared `host_fp_size` against `sizeof(struct user_fpsimd_state)` (528)
+rather than the 520 bytes actually copied.
+
 The boot log names the mode, so the gate is checkable rather than assumed
 (`arch/um/os-Linux/start_up.c`):
 
@@ -71,8 +87,14 @@ The boot log names the mode, so the gate is checkable rather than assumed
 g2-default   Userspace mode: ptrace      + Checking syscall emulation for ptrace...OK
 g2-seccomp   Userspace mode: SECCOMP
 g2-nosysemu  Userspace mode: ptrace      + Checking syscall emulation...skipped (nosysemu)
-g3-alpine    GATE3 ok root=/dev/ubda arch=aarch64 sum=5050 procs=200+16
+g3-alpine    GATE3 ok root=/dev/root arch=aarch64 sum=5050 procs=200+16
+fp-ptrace    FPTORTURE_OK
+fp-seccomp   Userspace mode: SECCOMP + FPTORTURE_OK
 ```
+
+(`root=/dev/root` and not `/dev/ubda`: that is what the guest's own
+`/proc/mounts` reports for the device it was given, which is why `gate3-init`
+accepts both.)
 
 Note that the **built-in default is ptrace**, not seccomp:
 `seccomp_config` is a zero-initialised `__initdata`, so only `seccomp=on` or
@@ -199,20 +221,19 @@ Two more Termux notes:
 
 `harness/loop.sh` lists the full gate matrix the port used
 (`g2mini g2alpine g3 g5 g3noaslr g4 fp fpnoaslr`) with the markers and init
-scripts each one needs. The `g2` and `g3` columns above are covered. Still
-missing, and worth adding in roughly this order:
+scripts each one needs. The `g2`, `g3` and `fp` columns above are covered, the
+FP torture in both userspace modes. Still missing, and worth adding in roughly
+this order:
 
 * **`g4`** -- fork/exec stress at 2000 sequential and 64 concurrent processes,
   with a pipeline whose sum is checked. `gate3-init` already does a scaled-down
   version (200 + 16); `g4` is the same shape with an order of magnitude more.
-* **`fp`** -- the FP/SIMD and FPCR/FPSR torture (`probe/fptorture.c`, marker
-  `FPTORTURE_OK`). This is not optional: the port has a fixed bug here, where
-  guest FP/SIMD state was not saved across a signal in seccomp mode because the
-  guard compared the wrong size.
 * **`noaslr`** -- the same gates with `probe/noaslr_preload.so` in `LD_PRELOAD`,
   which simulates an Android host that denies a `personality()` change.
-* **`docker`** -- `config/docker.config`, cgroup v2 and `overlay2`, the heaviest
-  and least CI-shaped gate.
+* **`g5`** and **`g7`** -- the hostfs and `apt install build-essential` gates;
+  `g7` needs a Debian image and a host filesystem share, so it is the least
+  CI-shaped of the set.
+* **`docker`** -- `config/docker.config`, cgroup v2 and `overlay2`.
 
 The original `init` scripts and rootfs images for those gates lived in the
 repository's sibling directories, outside the kernel tree, and are not part of

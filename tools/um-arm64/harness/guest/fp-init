@@ -1,0 +1,42 @@
+#!/bin/sh
+# Gate: FP/SIMD state torture from the Alpine rootfs.
+#
+# Runs probe/fptorture.c, which prints FPTORTURE_OK itself once every phase
+# passes and exits non-zero otherwise. That marker is the gate's verdict; this
+# init's job is only to mount what the probe needs, run it, and turn a non-zero
+# exit into a diagnosable failure instead of a bare kernel panic.
+#
+# The three paths the probe walks, and why a gate needs all three:
+#   1. syscall round-trip      -- the ptrace register copy, or the mcontext copy
+#                                 in seccomp mode
+#   2. task switch             -- two tasks with different FP state interleaved
+#   3. signal delivery         -- fpsimd_context through mcontext.__reserved[],
+#                                 hand-written in arch/arm64/um/signal.c
+#
+# Run as:  init=/fp-init ubd0=alpine.ext4 root=/dev/ubda rw [seccomp=on]
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+export PATH
+
+fail() {
+	echo "GATEFP_FAIL: $*"
+	exit 1
+}
+
+mkdir -p /proc /sys /dev /tmp 2>/dev/null
+mount -t proc     proc     /proc 2>/dev/null
+mount -t sysfs    sysfs    /sys  2>/dev/null
+mount -t devtmpfs devtmpfs /dev  2>/dev/null
+mount -t tmpfs    tmpfs    /tmp  2>/dev/null
+
+[ -r /proc/self/stat ] || fail "procfs is not mounted"
+[ -x /fptorture ]      || fail "/fptorture is not in the image"
+
+/fptorture
+rc=$?
+[ "$rc" = 0 ] || fail "fptorture exited $rc"
+
+poweroff -f
+
+sleep 5
+exit 0

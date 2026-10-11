@@ -167,6 +167,26 @@ jobs:
             marker: UMARM_BOOT_OK
             ubd0: alpine.ext4
             timeout: "300"
+          # The FP/SIMD torture, from the same root filesystem. All 32 vector
+          # registers plus FPCR/FPSR, bit-exact, across a syscall round-trip, a
+          # task switch and a signal -- the three state paths that are not the
+          # GPR set. Run in both userspace modes on purpose: the port's fixed
+          # bug here was specific to seccomp, where the guest's FP state was
+          # never saved or restored across a signal.
+          - name: fp-ptrace
+            extra: "rw"
+            initrd: ""
+            init: /fp-init
+            marker: FPTORTURE_OK
+            ubd0: alpine.ext4
+            timeout: "600"
+          - name: fp-seccomp
+            extra: "rw seccomp=on"
+            initrd: ""
+            init: /fp-init
+            marker: FPTORTURE_OK
+            ubd0: alpine.ext4
+            timeout: "600"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
