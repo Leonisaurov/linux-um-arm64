@@ -22,8 +22,8 @@ on:
 permissions:
   contents: read
 
-# One build per ref. A cancelled run must not race a live one for the run domain
-# (they are separate runners, but the cache key churns for no reason).
+# One build per ref. A cancelled run must not race a live one, and the ccache
+# key churns for no reason when two runs overlap.
 concurrency:
   group: um-arm64-${{ github.ref }}
   cancel-in-progress: true
@@ -33,10 +33,6 @@ jobs:
     name: build (native aarch64)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
-    env:
-      O: ${{ runner.temp }}/umarm-build
-      ART: ${{ runner.temp }}/artifacts
-      CCACHE_DIR: ${{ runner.temp }}/ccache
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -54,7 +50,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
-              clang lld llvm bc flex bison libelf-dev libssl-dev cpio zstd ccache
+              clang lld llvm bc flex bison libelf-dev libssl-dev zstd ccache
           clang --version | head -1
           ld.lld --version | head -1
           nproc
@@ -67,30 +63,35 @@ jobs:
       - name: Restore ccache
         uses: actions/cache@v4
         with:
-          path: ${{ env.CCACHE_DIR }}
+          path: ${{ runner.temp }}/ccache
           key: ccache-um-arm64-${{ github.sha }}
           restore-keys: |
             ccache-um-arm64-
 
       - name: Build kernel + stub
-        run: bash tools/um-arm64/harness/ci-build.sh
+        run: |
+          set -euo pipefail
+          export O="$RUNNER_TEMP/umarm-build"
+          export ART="$RUNNER_TEMP/artifacts"
+          export CCACHE_DIR="$RUNNER_TEMP/ccache"
+          bash tools/um-arm64/harness/ci-build.sh
 
       - name: Build initramfs gate fixture
         run: bash tools/um-arm64/harness/mkinitramfs.sh "$RUNNER_TEMP/initramfs.cpiogz"
 
       - name: ccache stats
         if: always()
-        run: ccache --show-stats || true
+        run: CCACHE_DIR="$RUNNER_TEMP/ccache" ccache --show-stats || true
 
       - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
         with:
           name: um-arm64-kernel
           path: |
-            ${{ env.ART }}/linux-um-arm64
-            ${{ env.ART }}/stub_exe
-            ${{ env.ART }}/kernel.config
-            ${{ env.ART }}/build.txt
+            ${{ runner.temp }}/artifacts/linux-um-arm64
+            ${{ runner.temp }}/artifacts/stub_exe
+            ${{ runner.temp }}/artifacts/kernel.config
+            ${{ runner.temp }}/artifacts/build.txt
             ${{ runner.temp }}/initramfs.cpiogz
           retention-days: 14
 
@@ -115,8 +116,6 @@ jobs:
           # Android kernel takes, and it is testable everywhere by design.
           - name: nosysemu
             extra: "nosysemu"
-    env:
-      ART: ${{ runner.temp }}/run
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -136,23 +135,25 @@ jobs:
           sudo sysctl -w kernel.yama.ptrace_scope=0 || true
 
       - name: Boot gate
-        env:
-          BIN: ${{ runner.temp }}/artifacts/linux-um-arm64
-          INITRD: ${{ runner.temp }}/artifacts/initramfs.cpiogz
-          GATE: g2-${{ matrix.name }}
-          MARKER: UMARM_GUEST_OK
-          INIT: /init
-          TIMEOUT: "180"
-          MEM: 512M
-          EXTRA_ARGS: ${{ matrix.extra }}
-        run: bash tools/um-arm64/harness/native.sh
+        run: |
+          set -euo pipefail
+          export BIN="$RUNNER_TEMP/artifacts/linux-um-arm64"
+          export INITRD="$RUNNER_TEMP/artifacts/initramfs.cpiogz"
+          export ART="$RUNNER_TEMP/run"
+          export GATE="g2-${{ matrix.name }}"
+          export MARKER="UMARM_GUEST_OK"
+          export INIT=/init
+          export TIMEOUT=180
+          export MEM=512M
+          export EXTRA_ARGS="${{ matrix.extra }}"
+          bash tools/um-arm64/harness/native.sh
 
       - name: Upload boot log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: um-arm64-boot-${{ matrix.name }}
-          path: ${{ env.ART }}/g2-${{ matrix.name }}
+          path: ${{ runner.temp }}/run/g2-${{ matrix.name }}
           if-no-files-found: warn
           retention-days: 14
 
@@ -162,12 +163,12 @@ jobs:
           {
             echo "### boot gate: ${{ matrix.name }}"
             echo '```'
-            cat "$ART"/g2-${{ matrix.name }}/result.txt 2>/dev/null || echo "no result.txt"
+            cat "$RUNNER_TEMP/run/g2-${{ matrix.name }}/result.txt" 2>/dev/null || echo "no result.txt"
             echo '```'
-            if [ -s "$ART"/g2-${{ matrix.name }}/kernel-bugs.txt ]; then
+            if [ -s "$RUNNER_TEMP/run/g2-${{ matrix.name }}/kernel-bugs.txt" ]; then
               echo "#### kernel diagnostics"
               echo '```'
-              cat "$ART"/g2-${{ matrix.name }}/kernel-bugs.txt
+              cat "$RUNNER_TEMP/run/g2-${{ matrix.name }}/kernel-bugs.txt"
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
