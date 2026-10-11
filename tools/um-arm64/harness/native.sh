@@ -38,6 +38,7 @@ UBD0=${UBD0:-}
 INIT=${INIT:-/bin/sh}
 STUB_EXE=${STUB_EXE:-}
 PRELOAD=${PRELOAD:-}
+PRELOAD_MARKER=${PRELOAD_MARKER:-}
 CON=${CON:-null}
 CON0=${CON0:-null,fd:1}
 
@@ -129,8 +130,20 @@ KBUGS=$(awk '{n += $1} END {print n+0}' "$OUT/kernel-bugs.txt")
 GUESTFAIL=$(grep -acE '^GATE[A-Z0-9_]*_FAIL' "$OUT/boot.log" 2>/dev/null || true)
 GUESTFAIL=${GUESTFAIL:-0}
 
+# A gate configured with a preload is only testing what it claims if the
+# library actually loaded. A wrong path, a wrong ABI or a refused load all fail
+# silently, and the gate would pass while exercising an ordinary host, so the
+# shim's own constructor line is required when PRELOAD_MARKER names it. This is
+# checked before the marker: an invalid run must not be able to pass at all.
+PRELOAD_MISSING=0
+if [ -n "$PRELOAD" ] && [ -n "$PRELOAD_MARKER" ]; then
+    grep -qF "$PRELOAD_MARKER" "$OUT/boot.log" 2>/dev/null || PRELOAD_MISSING=1
+fi
+
 # --- verdict ----------------------------------------------------------------
-if grep -qF "$MARKER" "$OUT/boot.log" 2>/dev/null; then
+if [ "$PRELOAD_MISSING" = 1 ]; then
+    VERDICT=PRELOAD_FAIL
+elif grep -qF "$MARKER" "$OUT/boot.log" 2>/dev/null; then
     if [ "$KBUGS" -gt 0 ]; then VERDICT=BUG; else VERDICT=PASS; fi
 elif [ "$GUESTFAIL" -gt 0 ]; then
     VERDICT=GUEST_FAIL
@@ -169,6 +182,8 @@ esac
     echo "marker=$MARKER"
     echo "cmdline=$CMDLINE"
     echo "preload=${PRELOAD:-none}"
+    echo "preload_marker=${PRELOAD_MARKER:-none}"
+    echo "preload_missing=$PRELOAD_MISSING"
     echo "boot_log_lines=$(wc -l < "$OUT/boot.log" 2>/dev/null || echo 0)"
     echo "kernel_bugs=$KBUGS"
     echo "guest_fail=$GUESTFAIL"

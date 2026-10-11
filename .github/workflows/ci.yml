@@ -211,6 +211,7 @@ jobs:
             ubd0: alpine.ext4
             timeout: "300"
             preload: noaslr_preload.so
+            preload_marker: noaslr_preload_active
           - name: fp-noaslr
             extra: "rw"
             initrd: ""
@@ -219,6 +220,7 @@ jobs:
             ubd0: alpine.ext4
             timeout: "600"
             preload: noaslr_preload.so
+            preload_marker: noaslr_preload_active
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -252,6 +254,7 @@ jobs:
           [ -z "${{ matrix.initrd }}" ] || export INITRD="$RUNNER_TEMP/artifacts/${{ matrix.initrd }}"
           [ -z "${{ matrix.ubd0 }}" ]   || export UBD0="$RUNNER_TEMP/artifacts/${{ matrix.ubd0 }}"
           [ -z "${{ matrix.preload }}" ] || export PRELOAD="$RUNNER_TEMP/artifacts/${{ matrix.preload }}"
+          [ -z "${{ matrix.preload_marker }}" ] || export PRELOAD_MARKER="${{ matrix.preload_marker }}"
           bash tools/um-arm64/harness/native.sh
 
       - name: Upload boot log

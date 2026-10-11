@@ -100,8 +100,28 @@ the request takes effect, and the goal is explicit that the address-space layout
 must not depend on it getting its way -- so this reproduces that host locally,
 today, rather than discovering it on a phone after the layout is settled.
 
-`native.sh` records the shim in `result.txt` as `preload=` and copies it into the
-run directory, so a run says which host it simulated.
+A preload that did not load would leave the gate testing an ordinary host and
+still passing, so the shim is self-proving: it has a constructor that writes
+`noaslr_preload_active` to stderr, the gates declare it as `PRELOAD_MARKER`, and
+`native.sh` refuses to pass a run (`verdict=PRELOAD_FAIL`) when the string is
+absent. That check runs **before** the marker check on purpose: a gate that did
+not test what it claims must not be able to pass at all.
+
+The effect is also visible in the kernel's own first line, which is worth
+knowing because it is the difference the port had to survive:
+
+```
+ordinary host:  Address space: host top 0x1000000000000, stub at 0xffffffff4000
+noaslr host:    Address space: host top 0xfffff4128000, stub at 0xfffff411c000
+```
+
+With `personality()` succeeding the port re-execs itself with ASLR off and the
+layout is deterministic; with the shim it stays randomised, and `TASK_SIZE` is
+unchanged in both (`0xff8000000000`).
+
+`native.sh` records the shim and its marker in `result.txt` as `preload=`,
+`preload_marker=` and `preload_missing=`, and copies the library into the run
+directory, so a run says which host it simulated.
 
 The boot log names the mode, so the gate is checkable rather than assumed
 (`arch/um/os-Linux/start_up.c`):
@@ -114,8 +134,8 @@ g3-alpine    GATE3 ok root=/dev/root arch=aarch64 sum=5050 procs=200+16
 g4-alpine    GATE4 ok sequential=2000 concurrent=64 sum=500500 pipeline=89440
 fp-ptrace    FPTORTURE_OK
 fp-seccomp   Userspace mode: SECCOMP + FPTORTURE_OK
-g3-noaslr    preload=noaslr_preload.so + GATE3 ok ...
-fp-noaslr    preload=noaslr_preload.so + FPTORTURE_OK
+g3-noaslr    noaslr_preload_active + GATE3 ok ...
+fp-noaslr    noaslr_preload_active + FPTORTURE_OK
 ```
 
 (`root=/dev/root` and not `/dev/ubda`: that is what the guest's own
