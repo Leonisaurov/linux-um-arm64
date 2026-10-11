@@ -27,8 +27,15 @@ $(obj)/stub_exe: $(obj)/stub_exe.dbg FORCE
 # KBUILD_CPPFLAGS), so without this clang links the stub with the build
 # machine's default linker and it fails with "file in wrong format" as soon as
 # the host and target architectures differ. Empty under gcc.
+#
+# --no-rosegment below is an lld option, but clang's default linker is the
+# system ld: on a host whose default ld is GNU bfd (an Ubuntu GitHub runner,
+# for instance) the link dies with "unrecognized option '--no-rosegment'".
+# kbuild only adds -fuse-ld=lld to KBUILD_HOSTLDFLAGS, which this rule does not
+# use, so select lld here explicitly, and only when clang is the driver.
 quiet_cmd_stub_exe = STUB_EXE $@
       cmd_stub_exe = $(CC) -nostdlib -o $@ $(filter --target=%,$(CLANG_FLAGS)) \
+			   $(if $(filter --target=%,$(CLANG_FLAGS)),-fuse-ld=lld) \
 			   $(filter-out $(UM_GPROF_OPT) $(UM_GCOV_OPT),$(KBUILD_CFLAGS)) $(STUB_EXE_LDFLAGS) \
 			   $(filter %.o,$^)
 

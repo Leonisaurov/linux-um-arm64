@@ -55,13 +55,14 @@ jobs:
           ld.lld --version | head -1
           nproc
 
-      # ccache keyed by commit with a stable prefix: a new commit misses the
-      # exact key but restores the most recent cache, which is what makes the
-      # kernel compile incremental. The cache holds only the compiler cache,
-      # never build outputs, so a stale restore cannot splice an old object into
-      # a new binary -- ccache hashes inputs, it does not trust mtimes.
+      # ccache keyed by commit with a stable prefix. Restore/save are separate
+      # on purpose: the save runs `if: always()`, so a build that fails late
+      # still leaves its compiler cache behind and the next attempt is
+      # incremental. The cache holds only the compiler cache, never build
+      # outputs, so a stale restore cannot splice an old object into a new
+      # binary -- ccache hashes inputs, it does not trust mtimes.
       - name: Restore ccache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/ccache
           key: ccache-um-arm64-${{ github.sha }}
@@ -82,6 +83,15 @@ jobs:
       - name: ccache stats
         if: always()
         run: CCACHE_DIR="$RUNNER_TEMP/ccache" ccache --show-stats || true
+
+      # run_attempt makes the key unique, so a rerun cannot collide with the
+      # cache this same run already saved.
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-um-arm64-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
