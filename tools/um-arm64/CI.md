@@ -235,6 +235,20 @@ later as "cannot execute binary file"), and it finds the host compiler before th
 Android `--target` shim joins `PATH` -- otherwise `command -v clang` resolves to
 that shim and every host tool gets built for Android.
 
+**The artifact is verified on the device, not just built.** CI has no phone, so
+it records what it built and leaves the last step to `harness/verify-artifact.sh`,
+which walks the whole chain: the kernel's md5 against `build.txt`, a boot for
+each page size that can run on the host, the guest reporting that page size, a
+`uname` containing the commit `build.txt` recorded, gcc inside the guest building
+the libm+pthreads program and it computing correctly, and -- given the helpers --
+the guest reaching the network. A page size below the host's is skipped with a
+reason rather than failed, because a guest page is a host `mmap()`.
+
+Run on a MEGA 3 (Android 15, 4 KB host pages) against the artifact from commit
+`05da2d23c`: **10/10, both page sizes**, with `uname -r` reporting
+`7.2.0-rc4-g05da2d23ca3d` -- the binary naming the commit it came from, which is
+the chain that makes a downloaded kernel checkable rather than trusted.
+
 ### The shipped artifact
 
 The `umdebian` job runs `harness/ci-umdebian.sh`, which gates the *product*
