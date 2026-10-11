@@ -238,8 +238,13 @@ if [ -n "$CLOCK_SLACK" ]; then
         CLOCK_FAIL="guest reported mono_elapsed=$CLOCK_GUEST"
     else
         d=$(awk -v h="$CLOCK_HOST" -v g="$CLOCK_GUEST" 'BEGIN{printf "%.3f", h-g}')
-        awk -v d="$d" -v s="$CLOCK_SLACK" 'BEGIN{exit !(d >= 0 && d < s)}' \
-            || CLOCK_FAIL="host-guest=$d (slack=$CLOCK_SLACK)"
+        # The floor is not zero on purpose: the probe compares whole seconds, so
+        # it can report up to a second more than the spin actually lasted, and
+        # that makes host-guest legitimately negative by up to a second. Zero was
+        # a latent false red; the measured overhead is 0.11 s, so -2 is generous
+        # and still far above the 13.8 s a 2x clock produces.
+        awk -v d="$d" -v s="$CLOCK_SLACK" 'BEGIN{exit !(d >= -2 && d < s)}' \
+            || CLOCK_FAIL="host-guest=$d (floor=-2 slack=$CLOCK_SLACK)"
     fi
 fi
 
@@ -284,7 +289,12 @@ fi
 # 132=SIGILL 133=SIGTRAP 134=SIGABRT 135=SIGBUS 136=SIGFPE 139=SIGSEGV
 case "$RC" in
 132|133|134|135|136|139)
-    case "$VERDICT" in PASS|BUG) ;; *) VERDICT=SIGNAL ;; esac
+    # A verdict that names a mechanism is worth more than SIGNAL, which only says
+    # the process died. gate3-init printing "GATE3_FAIL: exec /bin/true, iteration
+    # 16" and then panicking was reported as SIGNAL -- it died mysteriously --
+    # when the guest had already said exactly what happened. Only the generic
+    # verdicts are replaced.
+    case "$VERDICT" in FAIL|HANG|PANIC) VERDICT=SIGNAL ;; esac
     if command -v gdb >/dev/null 2>&1; then
         log "fatal signal (rc=$RC), capturing backtrace"
         timeout 90 gdb -batch -nx \

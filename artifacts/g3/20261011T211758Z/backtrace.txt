@@ -1,0 +1,4 @@
+"/data/data/com.termux/files/usr/tmp/clock-test/k": not in executable format: file format not recognized
+No executable file specified.
+Use the "file" or "exec-file" command.
+The program has no registers now.

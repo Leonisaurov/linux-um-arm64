@@ -797,8 +797,8 @@ jobs:
           # with timer_read() returning double (config/control-clock.patch) and
           # must *disagree*, which is what makes a green clock-guest mean
           # something. Neither number had ever been measured on either side.
-          - { name: clock-guest,   kernel: default,       ubd0: alpine.ext4, init: /clock-init, marker: UMARM_BOOT_OK, timeout: "900", extra: "rw", hostfs: "yes", hostfs_check: "", clock_slack: "20" }
-          - { name: clock-control, kernel: control-clock, ubd0: alpine.ext4, init: /clock-init, marker: UMARM_BOOT_OK, timeout: "900", extra: "rw", hostfs: "yes", hostfs_check: "", clock_slack: "20", expect_verdict: "CLOCK_FAIL" }
+          - { name: clock-guest,   kernel: default,       ubd0: alpine.ext4, init: /clock-init, marker: UMARM_BOOT_OK, timeout: "900", extra: "rw", hostfs: "yes", hostfs_check: "", clock_slack: "5" }
+          - { name: clock-control, kernel: control-clock, ubd0: alpine.ext4, init: /clock-init, marker: UMARM_BOOT_OK, timeout: "900", extra: "rw", hostfs: "yes", hostfs_check: "", clock_slack: "5", expect_verdict: "CLOCK_FAIL" }
           # --- gate 10: loadable modules, at the three memory sizes that decide
           # which relocation path the loader takes. The module arrives through a
           # hostfs share, so hostfs_check is empty on purpose: there is no file

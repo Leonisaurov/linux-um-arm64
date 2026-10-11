@@ -394,3 +394,24 @@ all *looked* fine.
    and sandbox-surface optimisation, and it needs the `sigstack[]` sizing
    question settled -- which should be settled on a 16 KB host, where the problem
    disappears.
+
+## A leak per exec, found next to the clock work
+
+`g3-noaslr` failed once with `verdict=SIGNAL` and was green in the run after,
+which looks like a flake. It is not. Its boot log says
+
+    /gate3-init: line 63: /bin/true: Out of memory
+    GATE3_FAIL: exec /bin/true, iteration 16
+
+so the guest ran out of memory at `mem=512M` after sixteen `exec`s. Sixteen is a
+small number for 512 MB, and the shape is the one this port has already been
+bitten by once: memory that grows per operation. The prime suspect is the stub --
+this port starts one stub per guest mm, and `exec` replaces the mm, so each one
+may be leaving a stub, or a mapping, behind.
+
+Two things follow. The flake loop's `g3` row runs the same init and is where to
+reproduce it, by lowering `mem=` until it fails every time instead of once. And
+the harness was hiding it: the guest printed `GATE3_FAIL` and named the failure,
+and the fatal-signal path overwrote that verdict with `SIGNAL`, which says only
+that the process died. A verdict that names a mechanism now survives a fatal
+signal; only the generic ones are replaced.
