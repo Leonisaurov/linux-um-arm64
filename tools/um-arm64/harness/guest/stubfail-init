@@ -1,0 +1,64 @@
+#!/bin/sh
+# Fault-injection gate for the init_new_context() error path.
+#
+# start_userspace() is forced to fail on its N-th call by
+# config/inject-stub-fail.patch, with N taken from the kernel command line
+# (stubfail=N). That failure is the only way to reach the error path
+# init_new_context() takes when a stub cannot be started; the path is not
+# reachable on demand otherwise. With the fix the guest survives the injected
+# ENOMEM and reaches the marker. With the list_del reverted
+# (config/control-mm-list.patch) the freed mm stays linked in mm_list, the next
+# mm allocation reuses it and folds the list into a cycle, and the next
+# mm_sigchld_irq() walk spins forever -- so the marker is never reached.
+#
+# A failed fork is the injection itself, not a broken guest, so the loop below
+# deliberately ignores it. The marker is printed last: reaching it means the
+# kernel stayed healthy across the injected failure and the forks that followed.
+#
+# Run as: init=/stubfail-init ubd0=alpine.ext4 root=/dev/ubda rw stubfail=N
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+export PATH
+
+fail() {
+	echo "GATESTUBFAIL_FAIL: $*"
+	exit 1
+}
+
+mkdir -p /proc /sys /dev /tmp 2>/dev/null
+mount -t proc     proc     /proc 2>/dev/null
+mount -t sysfs    sysfs    /sys  2>/dev/null
+mount -t devtmpfs devtmpfs /dev  2>/dev/null
+mount -t tmpfs    tmpfs    /tmp  2>/dev/null
+
+[ -r /proc/self/stat ] || fail "procfs is not mounted"
+[ -d /sys/kernel ]     || fail "sysfs is not mounted"
+
+# Volume of fork+exec, each a fresh mm and so a start_userspace() call. Exactly
+# one of them fails; the failing fork returns non-zero, which is normal and
+# must not abort init. The calls that follow are what reuse the freed mm. 2000
+# is the volume gate 4 already uses, so the count is not exotic.
+i=0
+while [ "$i" -lt 2000 ]; do
+	/bin/true 2>/dev/null || :
+	i=$((i + 1))
+done
+
+# Several stubs alive and dying at once, so SIGCHLD walks overlap. The walk is
+# what dereferences the freed mm in the broken kernel.
+i=0
+while [ "$i" -lt 32 ]; do
+	( /bin/true ) &
+	i=$((i + 1))
+done
+wait 2>/dev/null
+
+echo "STUBFAIL ok forks=2000"
+echo "UMARM_BOOT_OK"
+
+# Power off rather than let init exit: init exiting is a panic under panic=-1,
+# which would blunt the failure signal.
+poweroff -f
+
+sleep 5
+exit 0

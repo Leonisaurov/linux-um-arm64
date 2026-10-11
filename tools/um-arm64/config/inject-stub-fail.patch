@@ -1,0 +1,47 @@
+diff --git a/arch/um/os-Linux/skas/process.c b/arch/um/os-Linux/skas/process.c
+index e40bc4559..bd1b3e9ff 100644
+--- a/arch/um/os-Linux/skas/process.c
++++ b/arch/um/os-Linux/skas/process.c
+@@ -570,6 +570,28 @@ int have_ptrace_sysemu = 1;
+ int syscall_cancel_nr = -1;
+ int have_stub_cycles;
+ 
++/*
++ * Fault injection for the init_new_context() error path. A stub that cannot be
++ * started is the only way to reach that path, and it cannot be produced on
++ * demand otherwise, so the gate boots with stubfail=N to fail exactly the
++ * N-th start_userspace() call. Zero (the default) disables the injection.
++ */
++static int start_userspace_fail_at;
++static int start_userspace_calls;
++
++static int __init uml_stubfail_setup(char *line, int *add)
++{
++	*add = 0;
++	start_userspace_fail_at = strtoul(line, NULL, 0);
++	return 0;
++}
++
++__uml_setup("stubfail=", uml_stubfail_setup,
++"stubfail=<n>\n"
++"    Fail exactly the n-th start_userspace() call with -ENOMEM, to reach the\n"
++"    error path init_new_context() takes when a stub cannot be started.\n"
++"    0 (the default) disables the injection.\n\n");
++
+ /**
+  * start_userspace() - prepare a new userspace process
+  * @mm_id: The corresponding struct mm_id
+@@ -591,6 +613,13 @@ int start_userspace(struct mm_id *mm_id)
+ 	unsigned long sp;
+ 	int status, n, err;
+ 
++	if (start_userspace_fail_at &&
++	    ++start_userspace_calls == start_userspace_fail_at) {
++		printk(UM_KERN_ERR "%s : injected failure (call %d)\n",
++		       __func__, start_userspace_calls);
++		return -ENOMEM;
++	}
++
+ 	/* setup a temporary stack page */
+ 	stack = mmap(NULL, UM_KERN_PAGE_SIZE,
+ 		     PROT_READ | PROT_WRITE | PROT_EXEC,

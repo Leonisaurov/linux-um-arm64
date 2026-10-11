@@ -1,0 +1,41 @@
+Negative control for the mm_list use-after-free fix: revert the list_del.
+
+b38e70bc1 ("skas: take the mm back out of mm_list when starting its stub
+fails") added the list_del below, and recorded that it had no reproducing
+control because start_userspace() cannot be made to fail on demand. The
+injection patch (config/inject-stub-fail.patch) supplies that failure, and this
+patch removes the fix, so the two kernels differ only in the piece under test.
+
+With a stub failure injected, init_new_context() jumps to out_free with the mm
+still on mm_list. The caller's failure path does not call destroy_context(), so
+the mm is freed while linked. The next mm allocation reuses that slab object
+and list_add()s it again, which folds mm_list into a self-referential cycle;
+the next walk -- mm_sigchld_irq(), on any stub dying -- never terminates while
+holding mm_list_lock, so the run hangs. The fixed kernel takes the mm back out
+first and stays healthy.
+
+The boot job requires this control to reach the expected verdict (a hang, not a
+marker); a control that does not reproduce is a failure of the control, because
+it would mean the guest never drove start_userspace() into the error path.
+
+Apply with:  git apply tools/um-arm64/config/control-mm-list.patch
+diff --git a/arch/um/kernel/skas/mmu.c b/arch/um/kernel/skas/mmu.c
+index 2bf795439..2ef58ee9b 100644
+--- a/arch/um/kernel/skas/mmu.c
++++ b/arch/um/kernel/skas/mmu.c
+@@ -85,15 +85,6 @@ int init_new_context(struct task_struct *task, struct mm_struct *mm)
+ 	return 0;
+ 
+  out_free:
+-	/*
+-	 * The mm is about to be freed by the caller, and mm_init()'s failure path
+-	 * does not call destroy_context() -- so this list_del has no counterpart.
+-	 * Without it mm_list keeps a pointer into freed memory and the next walk of
+-	 * it, mm_sigchld_irq() on any stub dying, reads it: an ENOMEM while starting
+-	 * a stub becomes a use-after-free somewhere else.
+-	 */
+-	scoped_guard(spinlock_irqsave, &mm_list_lock)
+-		list_del(&mm->context.list);
+ 	free_pages(new_id->stack, ilog2(STUB_DATA_PAGES));
+  out:
+ 	return ret;
