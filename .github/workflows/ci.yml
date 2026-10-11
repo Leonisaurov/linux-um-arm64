@@ -471,6 +471,68 @@ jobs:
           path: ${{ runner.temp }}/android/
           retention-days: 30
 
+  # The APK, built and verified on the machine that builds it.
+  #
+  # On an x86_64 runner for the same reason the android job is, and the reason is
+  # worth repeating because everything else here is on ubuntu-24.04-arm: the
+  # arm64 runner images do not install the Android SDK at all -- the generator
+  # skips its whole section under Test-IsArm64 -- and the command-line tools
+  # package is an x86_64 build. There is nothing to pin and nothing to download:
+  # the x86_64 image ships build-tools and platforms under $ANDROID_HOME, so this
+  # job has no third-party artifact to keep current.
+  #
+  # What it cannot do is run the app. There is no device here, so the APK is
+  # checked for the things that otherwise only fail on a phone -- the signature,
+  # the aarch64 static binaries inside lib/arm64-v8a/, the assets the app reads at
+  # startup, and the manifest's own claims -- by harness/ci-umapp.sh.
+  umapp:
+    name: apk (umarm)
+    runs-on: ubuntu-24.04
+    needs: [build, android]
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download the artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/artifacts
+
+      - name: Build the APK
+        run: |
+          set -euo pipefail
+          ls -la "$RUNNER_TEMP/artifacts"
+          # build-apk.sh wants $ROOT/artifacts/<name> and $ROOT/dist/umdebian/,
+          # so the pieces are staged into that shape rather than the script being
+          # taught about the artifact layout.
+          export ROOT="$RUNNER_TEMP/umapp-root"
+          mkdir -p "$ROOT/artifacts" "$ROOT/dist/umdebian"
+          install -m 0755 "$RUNNER_TEMP/artifacts/um-arm64-android/16k/linux-um"  "$ROOT/artifacts/linux-bionic"
+          install -m 0755 "$RUNNER_TEMP/artifacts/um-arm64-android/16k/stub_exe" "$ROOT/artifacts/stub_exe_bionic"
+          install -m 0755 "$RUNNER_TEMP/artifacts/um-arm64-android/16k/umnet"    "$ROOT/dist/umdebian/umnet"
+          install -m 0755 "$RUNNER_TEMP/artifacts/um-arm64-android/16k/passt"    "$ROOT/dist/umdebian/passt"
+          # The initramfs is the gate-2 fixture. The tree has no producer for the
+          # Alpine one the app was shipped with -- that is a gap, and an APK that
+          # boots the fixture is a better artifact than one that boots nothing.
+          export INITRAMFS="$RUNNER_TEMP/artifacts/um-arm64-kernels/initramfs.cpiogz"
+          echo "ANDROID_HOME=${ANDROID_HOME:-unset} JAVA_HOME=${JAVA_HOME:-unset}"
+          bash tools/um-arm64/dist/umapp/build-apk.sh
+
+      - name: Verify the APK
+        run: bash tools/um-arm64/harness/ci-umapp.sh tools/um-arm64/dist/umapp/umarm.apk
+
+      - name: Upload the APK
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: umarm-apk
+          path: |
+            ${{ github.workspace }}/tools/um-arm64/dist/umapp/umarm.apk
+            ${{ github.workspace }}/tools/um-arm64/dist/umapp/build/
+          if-no-files-found: warn
+          retention-days: 14
+
   umdebian:
     name: umdebian (shipped artifact)
     needs: build

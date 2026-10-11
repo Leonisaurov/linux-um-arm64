@@ -25,14 +25,21 @@
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-ROOT=${ROOT:-/root/mlu-arm64}
-# Newest first. r34's d8 throws an internal NullPointerException on classes
-# compiled by JDK 21 ("Cannot invoke String.length() because <parameter1> is
-# null"), which reads like a bug in the app source and is not one -- r35's d8
-# takes the identical .class files. Picking the lowest version found made that
-# failure depend on which build-tools happened to be unpacked.
-BT=${BT:-$(ls -d /tmp/bt*/android-* 2>/dev/null | sort -V | tail -1)}
-ANDROID_JAR=${ANDROID_JAR:-$(find /tmp/plat -name android.jar 2>/dev/null | head -1)}
+# <kernel>/tools/um-arm64/dist/umapp -> <kernel>/tools/um-arm64, which is the
+# layout the paths below assume. It used to be the author's /root/mlu-arm64,
+# which made the script work in exactly one place.
+ROOT=${ROOT:-$(cd "$HERE/../.." && pwd)}
+# Newest first, and $ANDROID_HOME is where it looks before /tmp: the CI runner
+# ships the SDK under that variable, and a scratch unpack under /tmp should not
+# have to be moved for this to work. r34's d8 throws an internal
+# NullPointerException on classes compiled by JDK 21 ("Cannot invoke
+# String.length() because <parameter1> is null"), which reads like a bug in the
+# app source and is not one -- r35's d8 takes the identical .class files. Picking
+# the lowest version found made that failure depend on which build-tools happened
+# to be unpacked.
+SDK=${ANDROID_HOME:-/usr/local/lib/android/sdk}
+BT=${BT:-$(ls -d "$SDK"/build-tools/* /tmp/bt*/android-* 2>/dev/null | sort -V | tail -1)}
+ANDROID_JAR=${ANDROID_JAR:-$(ls "$SDK"/platforms/android-*/android.jar 2>/dev/null | sort -V | tail -1)}
 OUT=${OUT:-$HERE/build}
 APK=${APK:-$HERE/umarm.apk}
 

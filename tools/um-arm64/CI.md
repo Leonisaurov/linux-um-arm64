@@ -33,6 +33,7 @@ share removed.
 | `net-helpers` | `ubuntu-24.04-arm` | builds `umnet` and gates it with `ci-umnet.sh`: no kernel, no passt and no root needed |
 | `android` | `ubuntu-24.04-arm` | builds the kernel against the **Android NDK** for bionic, at 16 KB and 4 KB, and publishes `um-arm64-android` -- the artifact to download and run on a phone |
 | `boot` (matrix) | `ubuntu-24.04-arm` | downloads the artifact and runs `native.sh` for each gate, booting whichever kernel that gate names |
+| `umapp` | `ubuntu-24.04` | builds `dist/umapp` into an APK with `aapt2`/`javac`/`d8`/`apksigner` and verifies it with `ci-umapp.sh`. On an x86_64 runner for the same reason as `android`: the arm64 runner images install no Android SDK at all, and the command-line tools package is an x86_64 build. Nothing is downloaded -- the x86_64 image ships build-tools and platforms under `$ANDROID_HOME` |
 | `umdebian` | `ubuntu-24.04-arm` | builds a Debian root filesystem, assembles `dist/umdebian`, and drives the shipped launcher through its documented contract with `ci-umdebian.sh` |
 
 The three jobs are independent after `build`, so a red `umdebian` does not hide
@@ -262,7 +263,31 @@ rss-4k       GATERSS ok RSS_PARENT pages=2048 RSS_TOUCHED pages=2048 children=8 
 rss-control  GATERSS ok ... + BUG: Bad rss-counter state ... type:MM_FILEPAGES val:1  (expected)
 ```
 
-### The Android artifact
+#### The APK
+
+`umapp` builds the app the same way its `build-apk.sh` documents -- `aapt2`,
+`javac`, `d8`, `apksigner`, no Gradle -- and then checks it with
+`harness/ci-umapp.sh`, because there is no device on a runner to install it on.
+
+What that verifier can check is everything that otherwise only fails on a phone:
+that the signature verifies (Android refuses to install an unsigned APK, and that
+refusal happens after the download), that the native binaries are inside
+`lib/arm64-v8a/` and are aarch64 static ELFs (the app cannot exec from its data
+directory, which is why the kernel is shipped as `libuml.so`; a dynamic ELF or one
+for the host would extract fine and then fail to exec), that the assets the app
+reads at startup are present, and that the manifest claims what it must --
+`org.umarm.debian`, `minSdkVersion 26`, `arm64-v8a`, INTERNET, and the USB device
+filter that makes the attach prompt appear.
+
+Two differences from what the author shipped, both worth naming rather than
+hiding. `sockprobe_bionic` is absent: the script has a scratch slot for it, and
+the staging loop warns rather than failing, but there is no source for it in the
+tree. And the initramfs is the gate-2 fixture rather than the Alpine one the app
+was shipped with -- the tree has no producer for an Alpine initramfs, so the APK
+this job builds boots the fixture. An APK that boots something is a better
+artifact than one that boots nothing, but it is not the app the author released.
+
+## The Android artifact
 
 This is the one job that runs on an x86_64 runner (`ubuntu-24.04`), and the
 reason is worth recording because everything else here is on `ubuntu-24.04-arm`:
