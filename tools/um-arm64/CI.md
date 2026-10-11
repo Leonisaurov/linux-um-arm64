@@ -318,7 +318,15 @@ Each of these was invisible to the port's original machine and immediate here:
 
 4. **`runner.temp` is not available in the job-level `env:` context.** A
    workflow using it there does not fail with a syntax error -- it fails in 0s
-   with "This run likely failed because of a workflow file issue".
+   with "This run likely failed because of a workflow file issue", and it fails
+   with **zero jobs**, not one. That is worth being precise about: CI cannot
+   report on the workflow CI could not read, so the only place this is catchable
+   is before the push, which is why `harness/check-workflow.sh` exists. It checks
+   that and one more thing that has bitten this file -- a job without
+   `timeout-minutes`, which turns a hang into a six-hour run.
+
+   This was got wrong twice: once originally, and once again while adding the
+   `android` job. Both times the symptom was the same empty run.
 
 5. **`umnet` could not tell that the kernel had exited.** The UML side of its
    pump is an `AF_UNIX SOCK_DGRAM` socketpair, and closing the peer of a datagram

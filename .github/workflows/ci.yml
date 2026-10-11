@@ -177,7 +177,11 @@ jobs:
       ANDROID_NDK_SHA1: 090e8083a715fdb1a3e402d0763c388abb03fb4e
       ANDROID_API: '30'
       NDK_HOME: ${{ github.workspace }}/.ci/ndk
-      NDK_ZIP: ${{ runner.temp }}/android-ndk-r27c-linux.zip
+      # `github.workspace` and not `runner.temp`: the `runner` context does not
+      # exist in a job-level `env:`, and using it does not fail this job -- it
+      # fails the whole run in 0s with zero jobs, so nothing can report on it.
+      # harness/check-workflow.sh exists because this was got wrong once here.
+      NDK_ZIP: ${{ github.workspace }}/.ci/android-ndk-r27c-linux.zip
     steps:
       - name: Checkout
         uses: actions/checkout@v4
