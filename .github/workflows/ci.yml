@@ -187,6 +187,38 @@ jobs:
             marker: FPTORTURE_OK
             ubd0: alpine.ext4
             timeout: "600"
+          # Fork/exec at volume: 2000 sequential children and 64 alive at once.
+          # One stub per guest mm means 64 stub processes, which is where the
+          # port's reaper and stub-lifetime bugs lived, and none of the gates
+          # above start more than a handful of processes.
+          - name: g4-alpine
+            extra: "rw"
+            initrd: ""
+            init: /gate4-init
+            marker: UMARM_BOOT_OK
+            ubd0: alpine.ext4
+            timeout: "900"
+          # The same two gates with a host that forbids ADDR_NO_RANDOMIZE, via
+          # an LD_PRELOAD shim on the UML process itself. The goal states that
+          # personality() may be blocked on Android, so the address-space layout
+          # must not depend on it -- and this is what proves it does not, here
+          # rather than on a phone after the layout is settled.
+          - name: g3-noaslr
+            extra: "rw"
+            initrd: ""
+            init: /gate3-init
+            marker: UMARM_BOOT_OK
+            ubd0: alpine.ext4
+            timeout: "300"
+            preload: noaslr_preload.so
+          - name: fp-noaslr
+            extra: "rw"
+            initrd: ""
+            init: /fp-init
+            marker: FPTORTURE_OK
+            ubd0: alpine.ext4
+            timeout: "600"
+            preload: noaslr_preload.so
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -219,6 +251,7 @@ jobs:
           export EXTRA_ARGS="${{ matrix.extra }}"
           [ -z "${{ matrix.initrd }}" ] || export INITRD="$RUNNER_TEMP/artifacts/${{ matrix.initrd }}"
           [ -z "${{ matrix.ubd0 }}" ]   || export UBD0="$RUNNER_TEMP/artifacts/${{ matrix.ubd0 }}"
+          [ -z "${{ matrix.preload }}" ] || export PRELOAD="$RUNNER_TEMP/artifacts/${{ matrix.preload }}"
           bash tools/um-arm64/harness/native.sh
 
       - name: Upload boot log

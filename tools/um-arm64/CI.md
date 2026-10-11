@@ -49,6 +49,9 @@ installed on Termux and is an avoidable moving part.
 | `g3-alpine` | Alpine ext4 on `ubd0` | `rw` | guest VFS, block device, `fork`/`exec`, process teardown |
 | `fp-ptrace` | Alpine ext4 on `ubd0` | `rw` | FP/SIMD state: all 32 V registers plus FPCR/FPSR, bit-exact |
 | `fp-seccomp` | Alpine ext4 on `ubd0` | `rw seccomp=on` | the same torture on the seccomp path, where the port's fixed FP bug lived |
+| `g4-alpine` | Alpine ext4 on `ubd0` | `rw` | 2000 sequential `fork`/`exec` and 64 children alive at once |
+| `g3-noaslr` | Alpine ext4 on `ubd0` | `rw` + host `LD_PRELOAD` | gate 3 with `personality()` failing, i.e. an Android host |
+| `fp-noaslr` | Alpine ext4 on `ubd0` | `rw` + host `LD_PRELOAD` | the FP torture under the same simulated host |
 
 The `g2` fixture is `harness/probe/guestinit.c` as `/init`: a freestanding
 aarch64 binary with its own `_start`, raw `svc #0` calls, one guest capability
@@ -80,6 +83,26 @@ guest's FP/SIMD state was never saved or restored across a signal because the
 guard compared `host_fp_size` against `sizeof(struct user_fpsimd_state)` (528)
 rather than the 520 bytes actually copied.
 
+The `g4` fixture is `harness/guest/gate4-init`, the same image again. Gates 2
+and 3 start a handful of processes; this one starts thousands, sequentially and
+concurrently, and checks results rather than exit status -- a pipeline sum, a
+multi-stage pipeline whose output is compared against an independent
+computation, and a child's non-zero exit status surviving into the parent. One
+stub per guest mm means 64 concurrent children are 64 stub processes, which is
+the case the sequential loop cannot reach and where the port's reaper and
+stub-lifetime bugs lived.
+
+The two `noaslr` gates run the *same* init without changing anything inside the
+guest: `PRELOAD` puts `noaslr_preload.so` in the UML process's `LD_PRELOAD`, and
+that shim makes `personality(ADDR_NO_RANDOMIZE)` return `EPERM`. That is what an
+Android host does. The port asks for `ADDR_NO_RANDOMIZE` and re-execs itself if
+the request takes effect, and the goal is explicit that the address-space layout
+must not depend on it getting its way -- so this reproduces that host locally,
+today, rather than discovering it on a phone after the layout is settled.
+
+`native.sh` records the shim in `result.txt` as `preload=` and copies it into the
+run directory, so a run says which host it simulated.
+
 The boot log names the mode, so the gate is checkable rather than assumed
 (`arch/um/os-Linux/start_up.c`):
 
@@ -88,8 +111,11 @@ g2-default   Userspace mode: ptrace      + Checking syscall emulation for ptrace
 g2-seccomp   Userspace mode: SECCOMP
 g2-nosysemu  Userspace mode: ptrace      + Checking syscall emulation...skipped (nosysemu)
 g3-alpine    GATE3 ok root=/dev/root arch=aarch64 sum=5050 procs=200+16
+g4-alpine    GATE4 ok sequential=2000 concurrent=64 sum=500500 pipeline=89440
 fp-ptrace    FPTORTURE_OK
 fp-seccomp   Userspace mode: SECCOMP + FPTORTURE_OK
+g3-noaslr    preload=noaslr_preload.so + GATE3 ok ...
+fp-noaslr    preload=noaslr_preload.so + FPTORTURE_OK
 ```
 
 (`root=/dev/root` and not `/dev/ubda`: that is what the guest's own
@@ -221,18 +247,16 @@ Two more Termux notes:
 
 `harness/loop.sh` lists the full gate matrix the port used
 (`g2mini g2alpine g3 g5 g3noaslr g4 fp fpnoaslr`) with the markers and init
-scripts each one needs. The `g2`, `g3` and `fp` columns above are covered, the
-FP torture in both userspace modes. Still missing, and worth adding in roughly
-this order:
+scripts each one needs. Everything except `g5`, `g7` and `docker` is covered
+above. Still missing, and worth adding in roughly this order:
 
-* **`g4`** -- fork/exec stress at 2000 sequential and 64 concurrent processes,
-  with a pipeline whose sum is checked. `gate3-init` already does a scaled-down
-  version (200 + 16); `g4` is the same shape with an order of magnitude more.
-* **`noaslr`** -- the same gates with `probe/noaslr_preload.so` in `LD_PRELOAD`,
-  which simulates an Android host that denies a `personality()` change.
-* **`g5`** and **`g7`** -- the hostfs and `apt install build-essential` gates;
-  `g7` needs a Debian image and a host filesystem share, so it is the least
-  CI-shaped of the set.
+* **`g5`** -- hostfs: the guest reads a host directory and its writes land on
+  the host filesystem. Needs a host share rather than a guest fixture, so it is
+  a `native.sh` change (`-virtfs`-equivalent is UML's own `hostfs=` argument)
+  plus a check of the file on the host side afterwards.
+* **`g7`** -- `apt install build-essential` in a Debian guest, then build and
+  run something. The most valuable and the least CI-shaped: it needs a Debian
+  image (~1.4 GB) and the gate is slow by construction.
 * **`docker`** -- `config/docker.config`, cgroup v2 and `overlay2`.
 
 The original `init` scripts and rootfs images for those gates lived in the

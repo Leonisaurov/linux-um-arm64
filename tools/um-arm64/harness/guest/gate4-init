@@ -1,0 +1,71 @@
+#!/bin/sh
+# Gate 4: fork/exec stress from the Alpine rootfs.
+#
+# Gates 2 and 3 start a handful of processes; this one starts thousands, both
+# sequentially and concurrently, and checks the results rather than the exit
+# status. Container teardown and the stub lifetime are where the port's fork
+# bugs lived, and they only appear at volume: a single `fork` that works proves
+# nothing about the reaper or about 64 stubs alive at once.
+#
+# The marker is printed last, so reaching it means every check below ran.
+#
+# Run as:  init=/gate4-init ubd0=alpine.ext4 root=/dev/ubda rw
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+export PATH
+
+fail() {
+	echo "GATEG4_FAIL: $*"
+	exit 1
+}
+
+mkdir -p /proc /sys /dev /tmp 2>/dev/null
+mount -t proc     proc     /proc 2>/dev/null
+mount -t sysfs    sysfs    /sys  2>/dev/null
+mount -t devtmpfs devtmpfs /dev  2>/dev/null
+mount -t tmpfs    tmpfs    /tmp  2>/dev/null
+
+[ -r /proc/self/stat ] || fail "procfs is not mounted"
+
+# A pipeline with a checkable result: three processes, one pipe.
+sum=$(seq 1 1000 | awk '{ s += $1 } END { print s }')
+[ "$sum" = 500500 ] || fail "pipeline sum=$sum, expected 500500"
+
+# Sequential fork/exec. 2000 is the count the port's own gate 4 used; the point
+# is volume, and a leaked child or a stub that outlives its mm shows up here
+# before it shows up in anything interactive.
+i=0
+while [ "$i" -lt 2000 ]; do
+	/bin/true || fail "sequential fork/exec failed at iteration $i"
+	i=$((i + 1))
+done
+
+# Concurrent: 64 children alive at once, then all reaped. One stub per guest mm
+# means 64 stub processes, which is the case the sequential loop cannot reach.
+i=0
+while [ "$i" -lt 64 ]; do
+	( /bin/true; exit $? ) &
+	i=$((i + 1))
+done
+wait
+
+# A multi-stage pipeline whose output is checked, so the failure mode under test
+# is wrong data rather than a crash.
+got=$(seq 1 64 | while read -r n; do echo $((n * n)); done | \
+      awk '{ s += $1 } END { print s }')
+want=$(awk 'BEGIN { for (i = 1; i <= 64; i++) s += i * i; print s }')
+[ "$got" = "$want" ] || fail "multi-stage pipeline got=$got want=$want"
+
+# A child that exits non-zero must not take the parent with it, and the status
+# must survive.
+( exit 7 ) &
+wait $!
+[ "$?" = 7 ] || fail "child exit status was not 7"
+
+echo "GATE4 ok sequential=2000 concurrent=64 sum=$sum pipeline=$got"
+echo "UMARM_BOOT_OK"
+
+poweroff -f
+
+sleep 5
+exit 0

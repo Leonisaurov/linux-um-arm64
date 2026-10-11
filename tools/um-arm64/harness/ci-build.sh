@@ -92,6 +92,12 @@ else
     exit 1
 fi
 
+# Host-side LD_PRELOAD shim for the noaslr gates: built against the host ABI
+# because it is loaded into the UML process, not into the guest.
+clang --target=aarch64-linux-gnu -shared -fPIC \
+      -o "$ART/noaslr_preload.so" "$HERE/probe/noaslr_preload.c" || exit 1
+echo "### preload $ART/noaslr_preload.so ($(stat -c %s "$ART/noaslr_preload.so") bytes)"
+
 {
     echo "head=$(git -C "$TREE" rev-parse HEAD 2>/dev/null || echo unknown)"
     echo "clang=$(clang --version | head -1)"
@@ -99,6 +105,7 @@ fi
     echo "sha256_linux=$(sha256sum "$ART/linux-um-arm64" | cut -d' ' -f1)"
     echo "size_stub=$(stat -c %s "$ART/stub_exe")"
     echo "sha256_stub=$(sha256sum "$ART/stub_exe" | cut -d' ' -f1)"
+    echo "sha256_preload=$(sha256sum "$ART/noaslr_preload.so" | cut -d' ' -f1)"
     echo "built_utc=$(date -u +%Y%m%dT%H%M%SZ)"
 } > "$ART/build.txt"
 

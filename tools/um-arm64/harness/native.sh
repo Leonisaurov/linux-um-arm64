@@ -37,6 +37,7 @@ INITRD=${INITRD:-}
 UBD0=${UBD0:-}
 INIT=${INIT:-/bin/sh}
 STUB_EXE=${STUB_EXE:-}
+PRELOAD=${PRELOAD:-}
 CON=${CON:-null}
 CON0=${CON0:-null,fd:1}
 
@@ -49,6 +50,11 @@ log() { printf '[native] %s\n' "$*"; }
 [ -x "$BIN" ] || chmod +x "$BIN"          2>/dev/null || true
 [ -x "$BIN" ] || { echo "native.sh: $BIN is not executable" >&2; exit 2; }
 [ -z "$STUB_EXE" ] || chmod +x "$STUB_EXE" 2>/dev/null || true
+# PRELOAD is an LD_PRELOAD shim for the *host* process -- noaslr_preload.so
+# makes personality(ADDR_NO_RANDOMIZE) fail, which is what an Android host does.
+if [ -n "$PRELOAD" ]; then
+    [ -f "$PRELOAD" ] || { echo "native.sh: no preload library at $PRELOAD" >&2; exit 2; }
+fi
 
 # One run at a time. A UML that outlived its timeout still holds locks on its
 # ubd image; a second run would then fail for reasons that have nothing to do
@@ -72,6 +78,7 @@ OUT="$ART/$GATE/$STAMP"
 mkdir -p "$OUT"
 
 cp -f "$BIN" "$OUT/linux"
+[ -n "$PRELOAD" ] && cp -f "$PRELOAD" "$OUT/preload.so"
 [ -n "$STUB_EXE" ] && cp -f "$STUB_EXE" "$OUT/stub_exe"
 if [ -x "$HERE/env-check.sh" ]; then
     bash "$HERE/env-check.sh" > "$OUT/env.txt" 2>&1 || true
@@ -92,11 +99,14 @@ log "cmdline: $CMDLINE"
 
 # setsid + a process-group kill keeps the stub children from outliving a
 # timeout; the exit status of timeout is preserved separately from the pipeline.
+PRELOAD_ENV=()
+[ -n "$PRELOAD" ] && PRELOAD_ENV=(env "LD_PRELOAD=$PRELOAD")
+
 if command -v setsid >/dev/null 2>&1; then
-    setsid timeout --signal=KILL --kill-after=10 "$TIMEOUT" \
+    setsid "${PRELOAD_ENV[@]}" timeout --signal=KILL --kill-after=10 "$TIMEOUT" \
         "$BIN" $CMDLINE > "$OUT/boot.log" 2>&1 </dev/null
 else
-    timeout --signal=KILL --kill-after=10 "$TIMEOUT" \
+    "${PRELOAD_ENV[@]}" timeout --signal=KILL --kill-after=10 "$TIMEOUT" \
         "$BIN" $CMDLINE > "$OUT/boot.log" 2>&1 </dev/null
 fi
 RC=$?
@@ -158,6 +168,7 @@ esac
     echo "rc=$RC"
     echo "marker=$MARKER"
     echo "cmdline=$CMDLINE"
+    echo "preload=${PRELOAD:-none}"
     echo "boot_log_lines=$(wc -l < "$OUT/boot.log" 2>/dev/null || echo 0)"
     echo "kernel_bugs=$KBUGS"
     echo "guest_fail=$GUESTFAIL"
