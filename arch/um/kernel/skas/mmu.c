@@ -85,6 +85,15 @@ int init_new_context(struct task_struct *task, struct mm_struct *mm)
 	return 0;
 
  out_free:
+	/*
+	 * The mm is about to be freed by the caller, and mm_init()'s failure path
+	 * does not call destroy_context() -- so this list_del has no counterpart.
+	 * Without it mm_list keeps a pointer into freed memory and the next walk of
+	 * it, mm_sigchld_irq() on any stub dying, reads it: an ENOMEM while starting
+	 * a stub becomes a use-after-free somewhere else.
+	 */
+	scoped_guard(spinlock_irqsave, &mm_list_lock)
+		list_del(&mm->context.list);
 	free_pages(new_id->stack, ilog2(STUB_DATA_PAGES));
  out:
 	return ret;

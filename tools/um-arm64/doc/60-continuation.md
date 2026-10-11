@@ -395,23 +395,35 @@ all *looked* fine.
    question settled -- which should be settled on a 16 KB host, where the problem
    disappears.
 
-## A leak per exec, found next to the clock work
+## The `g3-noaslr` OOM was not a leak, and the hunt found something else
 
-`g3-noaslr` failed once with `verdict=SIGNAL` and was green in the run after,
-which looks like a flake. It is not. Its boot log says
+`g3-noaslr` failed once with `verdict=SIGNAL` and was green the run after. Its
+boot log said
 
     /gate3-init: line 63: /bin/true: Out of memory
     GATE3_FAIL: exec /bin/true, iteration 16
 
-so the guest ran out of memory at `mem=512M` after sixteen `exec`s. Sixteen is a
-small number for 512 MB, and the shape is the one this port has already been
-bitten by once: memory that grows per operation. The prime suspect is the stub --
-this port starts one stub per guest mm, and `exec` replaces the mm, so each one
-may be leaving a stub, or a mapping, behind.
+which reads like a leak per operation, at `mem=512M`, after sixteen `exec`s. It is
+not. Measured on this port's own kernels: **2000 execs at `mem=64M` complete**,
+30 of 30 boots at 512M complete, 10 of 10 on the 4 KB build. Guest `MemFree` falls
+0.32 MB over 2000 execs (-0.007 kB/exec), `PageTables` and `Slab` are flat, host
+RSS grows 0.024 kB/exec, and the stub count peaks at four and never accumulates.
+The old stub *is* reaped: `exec_mmap()` defers the old mm, `exec_mm_put_old()`
+drops it, `__mmdrop` calls `destroy_context()` (`arch/um/kernel/skas/mmu.c`),
+which kills the stub and frees its four pages. The signature in that log would
+need about 30 MB per exec -- off by a factor of 1.5 million.
 
-Two things follow. The flake loop's `g3` row runs the same init and is where to
-reproduce it, by lowering `mem=` until it fails every time instead of once. And
-the harness was hiding it: the guest printed `GATE3_FAIL` and named the failure,
-and the fatal-signal path overwrote that verdict with `SIGNAL`, which says only
-that the process died. A verdict that names a mechanism now survives a fatal
-signal; only the generic ones are replaced.
+So it was a transient host condition, and what looked like a leak was an ENOMEM.
+The useful part is what the hunt turned up next to it: `init_new_context()` adds
+the mm to `mm_list` and, when `start_userspace()` fails, jumps to `out_free`
+without taking it back out. The caller's failure path does not call
+`destroy_context()`, so the freed mm stays linked and the next walk of that list
+-- `mm_sigchld_irq()`, on any stub dying -- reads freed memory. That is now
+`list_del`'d on the error path.
+
+Unlike every other fix in this file, that one has **no reproducing control**: it
+needs `start_userspace()` to fail, which cannot be forced without fault
+injection, and it is not something that can be triggered on demand. It is a
+provable omission from an error path -- the success path's `destroy_context()`
+does the same `list_del` -- and it is weaker evidence than a control that
+reproduces, so it is written down as such rather than counted as verified.
