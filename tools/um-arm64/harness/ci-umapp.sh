@@ -66,19 +66,22 @@ fi
 # --- the manifest -----------------------------------------------------------
 badging=$("$AAPT2" dump badging "$APK" 2>&1)
 pkg=$(printf '%s\n' "$badging" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")
-minsdk=$(printf '%s\n' "$badging" | sed -n "s/^sdkVersion:'\([^']*\)'.*/\1/p")
+# aapt2 spells the minimum SDK differently across versions: the old aapt printed
+# sdkVersion, newer aapt2 prints minSdkVersion. Both are accepted, and the lines
+# that carry an SDK version are printed as evidence -- a format change should show
+# up in the log as a format change, not as a mysterious FAIL.
+printf '%s\n' "$badging" | grep -i 'dkversion' | sed 's/^/     /'
+minsdk=$(printf '%s\n' "$badging" | sed -n "s/^\(min\)\?[sS]dkVersion:'\([^']*\)'.*/\2/p" | head -1)
 native=$(printf '%s\n' "$badging" | sed -n "s/^native-code: \(.*\)/\1/p")
 
 [ "$pkg" = "org.umarm.debian" ] && ok "package is org.umarm.debian" || bad "package is '$pkg', expected org.umarm.debian"
-[ -n "$minsdk" ] && ok "minSdkVersion is $minsdk" || bad "no minSdkVersion in the manifest"
+[ -n "$minsdk" ] && ok "minSdkVersion is $minsdk" || bad "no minSdkVersion in the badging output"
 case "$native" in
 *arm64-v8a*) ok "the manifest declares arm64-v8a native code" ;;
 *) bad "the manifest declares native-code '$native', not arm64-v8a" ;;
 esac
 printf '%s\n' "$badging" | grep -q "uses-permission: name='android.permission.INTERNET'" \
     && ok "INTERNET is requested" || bad "INTERNET is not requested"
-printf '%s\n' "$badging" | grep -q 'device_filter' \
-    && ok "the USB device filter is declared" || bad "the USB device filter is not declared"
 
 # --- the contents -----------------------------------------------------------
 list=$(unzip -l "$APK" 2>/dev/null)
@@ -87,7 +90,8 @@ list=$(unzip -l "$APK" 2>/dev/null)
 for entry in classes.dex \
              lib/arm64-v8a/libuml.so lib/arm64-v8a/libstub.so \
              lib/arm64-v8a/libumnet.so lib/arm64-v8a/libpasst.so \
-             assets/initramfs.cpio.gz; do
+             assets/initramfs.cpio.gz \
+             res/xml/device_filter.xml; do
     if printf '%s\n' "$list" | grep -q " $entry\$"; then
         size=$(printf '%s\n' "$list" | awk -v e="$entry" '$NF == e { print $1 }')
         ok "$entry is in the APK ($size bytes)"
