@@ -31,6 +31,7 @@ share removed.
 | --- | --- | --- |
 | `build` | `ubuntu-24.04-arm` | `ci-build.sh` builds `ARCH=um SUBARCH=arm64 LLVM=1` twice -- `arm64_defconfig`, and the same tree with `config/docker.config` merged -- and emits both kernels, the freestanding `stub_exe`, the exact `.config`s, the Alpine root filesystem, and the gate-2 fixture |
 | `net-helpers` | `ubuntu-24.04-arm` | builds `umnet` and gates it with `ci-umnet.sh`: no kernel, no passt and no root needed |
+| `android` | `ubuntu-24.04-arm` | builds the kernel against the **Android NDK** for bionic, at 16 KB and 4 KB, and publishes `um-arm64-android` -- the artifact to download and run on a phone |
 | `boot` (matrix) | `ubuntu-24.04-arm` | downloads the artifact and runs `native.sh` for each gate, booting whichever kernel that gate names |
 | `umdebian` | `ubuntu-24.04-arm` | builds a Debian root filesystem, assembles `dist/umdebian`, and drives the shipped launcher through its documented contract with `ci-umdebian.sh` |
 
@@ -184,6 +185,43 @@ g5-hostfs    GATE5 ok host_read='hello-from-host' blocks=256
 g7-debian    GATE7 ok gcc=12 GATE7_C_OK threads=4 counter=40000
 docker-prereqs  GATEDOCKER ok symbols=... controllers=...
 ```
+
+### The Android artifact
+
+Everything else here builds the **glibc** variant: that is the run domain, and it
+is what the gates boot. It is also not what runs on a phone. An app process is
+started by zygote with a seccomp filter already installed, and glibc's startup
+issues `rseq(2)` and `set_robust_list(2)`, which that filter kills -- a glibc
+binary dies before `main()` having printed nothing at all. bionic is the libc the
+filter was written for, so `android` builds the same kernel against the NDK:
+
+* **The NDK is pinned twice**: by version and by the sha1 Google publishes for the
+  zip (`27.2.12479018`, `090e8083a715fdb1a3e402d0763c388abb03fb4e`). The *zip* is
+  cached rather than the unpacked tree -- 663 MB instead of several GB -- and the
+  sha1 is verified on every use, so a cache entry is never trusted further than
+  the download it came from. Keyed by version *and* digest, so it cannot go
+  stale.
+* **Both page sizes**, in separate directories. 16 KB is the shipped default and
+  the only setting that runs on any host, because a guest page is a host `mmap()`
+  and a 4 KB guest cannot boot on a 16 KB one; 4 KB is what most phones are today
+  and what the port's gate history was collected on. `build-bionic.sh` asserts the
+  symbol took effect after `olddefconfig`, because `scripts/config -e` on a name
+  that does not exist warns and carries on, and the failure would then be a kernel
+  that boots everywhere except the host it was built for.
+* **`stub_exe` ships with it**, because an Android domain refuses `execveat()` on
+  a memfd; without it the kernel exits having printed nothing.
+* **What is missing is `passt`.** `harness/build-net-bionic.sh` builds the two
+  networking helpers, but it applies `dist/passt-bionic.patch`, which is not in
+  this tree: passt is a glibc/musl program and needs porting to bionic. An
+  existing `passt`/`umnet` pair works with any kernel -- they meet the kernel at a
+  socketpair, not at a build -- or the guest runs with no network.
+
+`harness/build-bionic.sh` also gained the two things that make it runnable off an
+x86_64 runner: it picks the NDK prebuilt for *this* host (`linux-aarch64` on an
+arm64 machine, and it refuses a stock x86_64-only NDK there rather than failing
+later as "cannot execute binary file"), and it finds the host compiler before the
+Android `--target` shim joins `PATH` -- otherwise `command -v clang` resolves to
+that shim and every host tool gets built for Android.
 
 ### The shipped artifact
 

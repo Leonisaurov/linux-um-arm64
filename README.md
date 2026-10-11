@@ -236,8 +236,19 @@ prerequisites on a kernel built with `config/docker.config`. A separate job then
 verifies the **artifact** rather than the kernel -- `dist/umdebian`'s launcher,
 driven through the contract its README documents (a command in, its output out,
 its status propagated, the host share both ways, and a sentence instead of a
-stack trace when the image is already locked). See
-**[tools/um-arm64/CI.md](tools/um-arm64/CI.md)** for the pipeline, the ccache
+stack trace when the image is already locked).
+
+One job exists purely for the phone. Everything above builds the **glibc**
+variant, because that is the run domain the gates boot -- and it is not what runs
+on a device. An Android app process starts with a seccomp filter already
+installed, and glibc's startup issues `rseq(2)` and `set_robust_list(2)`, which
+that filter kills; the binary dies before `main()` and prints nothing at all. So
+the `android` job builds the same kernel against the pinned **Android NDK** for
+bionic, at both page sizes, and publishes `um-arm64-android`: kernel, `stub_exe`,
+launcher and a `RUN.md` with the commands, ready to copy onto a phone and run.
+That is the artifact to download if what you want is your own UML.
+
+See **[tools/um-arm64/CI.md](tools/um-arm64/CI.md)** for the pipeline, the ccache
 contract, the bugs the pipeline found, and how to run the same gates on any arm64
 Linux or on Termux (where `stub_exe=` is required, because Android's
 `untrusted_app` domain refuses `execveat` on a memfd).

@@ -156,6 +156,208 @@ jobs:
             cat umnet-ci/checks.txt 2>/dev/null || true
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # The artifact for the phone itself. Everything else here builds the glibc
+  # variant, which is the run domain and what the gates boot -- but an Android
+  # app process is started by zygote with a seccomp filter already installed, and
+  # glibc's startup issues calls that filter kills (rseq, set_robust_list), so a
+  # glibc binary dies before main() having printed nothing. bionic is the libc
+  # that filter was written for, so this job builds the same kernel against the
+  # NDK and publishes it with the stub and the launcher it needs.
+  android:
+    name: android/bionic (aarch64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    env:
+      # Pinned by version and by the sha1 Google publishes for it, the way the
+      # Alpine rootfs is pinned by sha256: a toolchain that changes under a job is
+      # a job that cannot be reproduced. r27c is what the port's bionic binaries
+      # were built with, so this is the same compiler the working ones came from.
+      ANDROID_NDK_VERSION: '27.2.12479018'
+      ANDROID_NDK_URL: https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
+      ANDROID_NDK_SHA1: 090e8083a715fdb1a3e402d0763c388abb03fb4e
+      ANDROID_API: '30'
+      NDK_HOME: ${{ github.workspace }}/.ci/ndk
+      NDK_ZIP: ${{ runner.temp }}/android-ndk-r27c-linux.zip
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+              /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker system prune -af >/dev/null 2>&1 || true
+          df -h / "$RUNNER_TEMP" || true
+
+      - name: Install host toolchain
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+              clang lld llvm bc flex bison libelf-dev libssl-dev zstd ccache unzip
+          clang --version | head -1
+          ld.lld --version | head -1
+
+      # The zip, not the unpacked tree: 663 MB instead of several GB, and the
+      # sha1 is checked on every use, so a cache entry is never trusted further
+      # than the download it came from. Keyed by version *and* digest, i.e.
+      # content-addressed, so it cannot go stale.
+      - name: Restore the NDK archive
+        id: ndk-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.NDK_ZIP }}
+          key: ndk-${{ env.ANDROID_NDK_VERSION }}-${{ env.ANDROID_NDK_SHA1 }}-${{ runner.arch }}
+
+      - name: Fetch and unpack the NDK
+        run: |
+          set -euo pipefail
+          if [ ! -f "$NDK_ZIP" ]; then
+            echo "downloading $ANDROID_NDK_URL"
+            curl -fsSL --retry 3 --retry-all-errors -o "$NDK_ZIP.part" "$ANDROID_NDK_URL"
+            mv "$NDK_ZIP.part" "$NDK_ZIP"
+          fi
+          echo "$ANDROID_NDK_SHA1  $NDK_ZIP" | sha1sum -c -
+          rm -rf "$NDK_HOME"
+          mkdir -p "$NDK_HOME"
+          unzip -q "$NDK_ZIP" -d "$NDK_HOME"
+          ls -d "$NDK_HOME"/android-ndk-* >/dev/null
+          "$NDK_HOME"/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin/clang \
+             --version | head -1
+
+      # Only when it was a miss: saving a key that already exists is an error.
+      - name: Save the NDK archive
+        if: steps.ndk-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.NDK_ZIP }}
+          key: ndk-${{ env.ANDROID_NDK_VERSION }}-${{ env.ANDROID_NDK_SHA1 }}-${{ runner.arch }}
+
+      # A separate cache chain from the glibc builds: same ccache, different
+      # compiler and different target, so the objects never overlap.
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/ccache-bionic
+          key: ccache-um-arm64-bionic-${{ github.sha }}
+          restore-keys: |
+            ccache-um-arm64-bionic-
+
+      # Both page sizes. 16 KB is the shipped default and the only setting that
+      # runs on any host, because a guest page is a host mmap() and a 4 KB guest
+      # cannot boot on a 16 KB one; 4 KB is what most phones are today and what
+      # the port's own gate history was collected on, at the cost of a few percent
+      # of internal fragmentation. They are separate directories so a run cannot
+      # be misread as the other.
+      - name: Build the bionic kernel (16 KB pages)
+        run: |
+          set -euo pipefail
+          export NDK="$NDK_HOME/android-ndk-r27c"
+          export O="$RUNNER_TEMP/bionic-16k"
+          export ART="$RUNNER_TEMP/android/16k"
+          export CCACHE_DIR="$RUNNER_TEMP/ccache-bionic"
+          export NAME=linux-um STUBNAME=stub_exe PAGESIZE=16k API="$ANDROID_API"
+          bash tools/um-arm64/harness/build-bionic.sh
+
+      - name: Build the bionic kernel (4 KB pages)
+        run: |
+          set -euo pipefail
+          export NDK="$NDK_HOME/android-ndk-r27c"
+          export O="$RUNNER_TEMP/bionic-4k"
+          export ART="$RUNNER_TEMP/android/4k"
+          export CCACHE_DIR="$RUNNER_TEMP/ccache-bionic"
+          export NAME=linux-um STUBNAME=stub_exe PAGESIZE=4k API="$ANDROID_API"
+          bash tools/um-arm64/harness/build-bionic.sh
+
+      - name: Assemble the artifact
+        run: |
+          set -euo pipefail
+          A="$RUNNER_TEMP/android"
+          for p in 16k 4k; do
+            install -m 0755 tools/um-arm64/dist/umdebian/deb        "$A/$p/deb"
+            install -m 0755 tools/um-arm64/dist/umdebian/install.sh "$A/$p/install.sh"
+          done
+          {
+            echo "# Your own UML, for Android (bionic, aarch64)"
+            echo
+            echo "Built from \`$(git rev-parse --short HEAD)\` with NDK"
+            echo "\`$ANDROID_NDK_VERSION\` (API \`$ANDROID_API\`), statically linked against"
+            echo "bionic. This is the variant that runs inside an Android app or an adb or"
+            echo "Termux shell. The glibc one in \`um-arm64-kernels\` does not: glibc's"
+            echo "startup issues rseq(2) and set_robust_list(2), which the seccomp filter"
+            echo "zygote installs kills, so it dies before main() with no output."
+            echo
+            echo "## Which page size"
+            echo
+            echo '| | |'
+            echo '| --- | --- |'
+            echo "| \`16k/\` | \`CONFIG_PAGE_SIZE_16KB\`. Runs on **any** host, 4 KB and 16 KB alike. Use this one. |"
+            echo "| \`4k/\` | \`CONFIG_PAGE_SIZE_4KB\`. **Only** on a 4 KB host, which is what most phones still are. A few percent less internal fragmentation. |"
+            echo
+            echo "Each holds \`linux-um\` (the kernel), \`stub_exe\`, \`deb\` (the launcher) and"
+            echo "\`install.sh\`, with the numbers for that binary in \`linux-um.build.txt\`."
+            echo
+            echo "\`stub_exe\` is not optional on Android: UML normally writes its stub into"
+            echo "a memfd and \`execveat\`s it, which an app or shell domain refuses. Without it"
+            echo "the kernel exits having printed nothing at all."
+            echo
+            echo "## Use it"
+            echo
+            echo 'From the phone, given a Debian image and a `passt`/`umnet` pair:'
+            echo
+            echo '```sh'
+            echo 'mkdir -p ~/um && cd ~/um'
+            echo 'cp .../16k/{linux-um,stub_exe,deb} .'
+            echo 'cp /path/to/debian.ext4 .'
+            echo './deb uname -a'
+            echo '```'
+            echo
+            echo 'Over adb, into an installed directory:'
+            echo
+            echo '```sh'
+            echo 'adb push 16k/linux-um /data/local/tmp/umdebian/linux-um'
+            echo 'adb push 16k/stub_exe /data/local/tmp/umdebian/stub_exe'
+            echo 'adb push 16k/deb      /data/local/tmp/umdebian/deb'
+            echo "adb shell 'cd /data/local/tmp/umdebian && ./deb uname -a'"
+            echo '```'
+            echo
+            echo '\`install.sh\` checks the page size and refuses a kernel whose guest page is'
+            echo "smaller than the device's host page -- which hangs rather than failing. Pass"
+            echo '\`GUEST_PAGESIZE=16384\` (or \`4096\`) explicitly here, because the file is'
+            echo 'called \`linux-um\` and install.sh will not guess it from that.'
+            echo
+            echo '## Not here yet: the networking helpers'
+            echo
+            echo '\`umnet\` and \`passt\`. \`harness/build-net-bionic.sh\` builds them, but it'
+            echo 'applies \`dist/passt-bionic.patch\`, which is not in the tree -- passt is a'
+            echo 'glibc/musl program and needs porting to bionic. An existing pair works with'
+            echo 'any kernel (they meet the kernel at a socketpair, not at a build), or run'
+            echo 'with \`UMDEB_NET=0\` and no networking at all.'
+          } > "$A/RUN.md"
+          find "$A" -type f | sort
+          cat "$A"/16k/linux-um.build.txt "$A"/4k/linux-um.build.txt
+
+      - name: ccache stats
+        if: always()
+        run: CCACHE_DIR="$RUNNER_TEMP/ccache-bionic" ccache --show-stats || true
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/ccache-bionic
+          key: ccache-um-arm64-bionic-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # 30 days rather than the default 14: this one is meant to be downloaded
+      # and run, not read after a failure.
+      - name: Upload the Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: um-arm64-android
+          path: ${{ runner.temp }}/android/
+          retention-days: 30
+
   umdebian:
     name: umdebian (shipped artifact)
     needs: build
