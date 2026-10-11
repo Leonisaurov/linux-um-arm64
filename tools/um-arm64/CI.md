@@ -549,6 +549,16 @@ Each of these was invisible to the port's original machine and immediate here:
    checks that /var/tmp is writable so that the next occurrence names itself
    instead of failing with an empty message.
 
+10. **`make modules` succeeded and produced nothing.** The modules config named
+   `CONFIG_MODULES=y` and nothing else, on the reasoning that
+   `arm64_defconfig` already says `CONFIG_BINFMT_MISC=m`. But the first
+   `make defconfig` runs olddefconfig while MODULES is still off, and Kconfig
+   resolves a tristate whose dependency is `n` to `y` -- so by the time the
+   fragment merged `CONFIG_MODULES=y`, the `m` was gone and olddefconfig does not
+   bring it back. The build was green, the artifact held an empty directory, and
+   the gate said `no .ko in the host share`. The fragment now names the modules it
+   wants, which is the only way for them to survive the order the build runs in.
+
 ## Running the same gates locally
 
 ### On any arm64 Linux

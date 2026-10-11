@@ -74,10 +74,16 @@ mod_size=$(awk '/^binfmt_misc / {print $2}' /proc/modules)
 [ -n "$mod_size" ] || fail "no size for binfmt_misc in /proc/modules"
 
 # rmmod as well, because MODULE_UNLOAD is on and the unload path frees the
-# module's allocation through the same vmalloc UML gave it.
+# module's allocation through the same vmalloc UML gave it. Reverse order, and
+# every module has to come out: a module that will not unload is as much a
+# loader bug as one that will not load.
 if command -v rmmod >/dev/null 2>&1; then
-	rmmod binfmt_misc || fail "rmmod binfmt_misc failed"
-	grep -q '^binfmt_misc ' /proc/modules && fail "binfmt_misc still loaded after rmmod"
+	set -- /mnt/host/*.ko
+	for ko in "$@"; do
+		mod=$(basename "$ko" .ko)
+		rmmod "$mod" || fail "rmmod $mod failed"
+		grep -q "^$mod " /proc/modules && fail "$mod still loaded after rmmod"
+	done
 	grep -q 'binfmt_misc' /proc/filesystems && fail "the filesystem outlived the module"
 	echo "GATEMODULE rmmod ok"
 fi
