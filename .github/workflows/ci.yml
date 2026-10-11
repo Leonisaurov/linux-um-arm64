@@ -163,6 +163,17 @@ jobs:
           export ART="$RUNNER_TEMP/artifacts"
           bash tools/um-arm64/harness/mkinitramfs.sh "$ART/initramfs.cpiogz"
 
+      # The Alpine initramfs: the guest the app boots when it has no disk image,
+      # and the fixture the Alpine-initramfs gate boots. It exists because a
+      # static freestanding /init cannot tell a complete archive from an empty
+      # one -- busybox is a dynamic musl binary, so if it runs, the loader and
+      # libc and the symlinks that point at them all came along.
+      - name: Build the Alpine initramfs
+        run: |
+          set -euo pipefail
+          export ART="$RUNNER_TEMP/artifacts"
+          DISTRO=alpine bash tools/um-arm64/harness/mkinitramfs.sh "$ART/initramfs-alpine.cpiogz"
+
       - name: ccache stats
         if: always()
         run: CCACHE_DIR="$RUNNER_TEMP/ccache" ccache --show-stats || true
@@ -523,10 +534,10 @@ jobs:
           install -m 0755 "$RUNNER_TEMP/artifacts/um-arm64-android/16k/stub_exe" "$ROOT/artifacts/stub_exe_bionic"
           install -m 0755 "$RUNNER_TEMP/artifacts/um-arm64-android/16k/umnet"    "$ROOT/dist/umdebian/umnet"
           install -m 0755 "$RUNNER_TEMP/artifacts/um-arm64-android/16k/passt"    "$ROOT/dist/umdebian/passt"
-          # The initramfs is the gate-2 fixture. The tree has no producer for the
-          # Alpine one the app was shipped with -- that is a gap, and an APK that
-          # boots the fixture is a better artifact than one that boots nothing.
-          export INITRAMFS="$RUNNER_TEMP/artifacts/um-arm64-kernels/initramfs.cpiogz"
+          # The Alpine initramfs, which is the guest the app boots when it has
+          # no disk image: a real busybox and a real shell. It used to be the
+          # gate-2 fixture because the tree had no producer for an Alpine one.
+          export INITRAMFS="$RUNNER_TEMP/artifacts/um-arm64-kernels/initramfs-alpine.cpiogz"
           echo "ANDROID_HOME=${ANDROID_HOME:-unset} JAVA_HOME=${JAVA_HOME:-unset}"
           bash tools/um-arm64/dist/umapp/build-apk.sh
 
@@ -695,6 +706,13 @@ jobs:
           - { name: g2-default,   kernel: default, initrd: initramfs.cpiogz, init: /init,         marker: UMARM_GUEST_OK,  timeout: "180" }
           - { name: g2-seccomp,   kernel: default, initrd: initramfs.cpiogz, init: /init,         marker: UMARM_GUEST_OK,  timeout: "180", extra: "seccomp=on" }
           - { name: g2-nosysemu,  kernel: default, initrd: initramfs.cpiogz, init: /init,         marker: UMARM_GUEST_OK,  timeout: "180", extra: "nosysemu" }
+          # --- the Alpine initramfs, which is what the app boots when it has no
+          # disk image. A real busybox and a real musl rather than a freestanding
+          # static probe, so what is under test is that the archive is complete:
+          # a /init with its own _start cannot tell a full one from an empty one.
+          # The port's own loop.sh had this row (g2alpine) and this matrix never
+          # did.
+          - { name: g2-alpine-initrd, kernel: default, initrd: initramfs-alpine.cpiogz, init: /init, marker: UMARM_INITRD_OK, timeout: "300", extra: "umarm.initrd.test=1" }
           # --- gate 3: a real Alpine ext4 root filesystem from ubd0, which
           # exercises the guest VFS, the block device, fork/exec and teardown.
           - { name: g3-alpine,    kernel: default, ubd0: alpine.ext4, init: /gate3-init,          marker: UMARM_BOOT_OK,   timeout: "300", extra: "rw" }

@@ -38,24 +38,19 @@ DEBIAN_MIRROR=${DEBIAN_MIRROR:-http://deb.debian.org/debian}
 # bridge, and nftables, which is what Debian's iptables-nft actually speaks.
 DEBIAN_INCLUDE=${DEBIAN_INCLUDE:-build-essential,file,procps,psmisc,ca-certificates,iproute2,nftables,util-linux,kmod,gzip,xz-utils}
 SUDO=${SUDO:-sudo}
+# The pins and the fetcher come from one place: mkinitramfs.sh builds an initramfs
+# out of the same Alpine release, and two copies of a version string drift the
+# moment one of them is updated.
+. "$HERE/pins.sh"
 
 CC=${CC:-clang}
 TARGET=${TARGET:-aarch64-linux-gnu}
 
-CACHE=${CACHE:-${TMPDIR:-/tmp}/umarm-rootfs-cache}
 mkdir -p "$CACHE"
 
 command -v mke2fs >/dev/null 2>&1 || {
     echo "mkrootfs.sh: mke2fs not found (install e2fsprogs)" >&2
     exit 2
-}
-
-fetch() {
-    local f=$1
-    [ -f "$CACHE/$f" ] && return 0
-    echo "downloading $ALPINE_BASE/$f" >&2
-    curl -fsSL --retry 3 --retry-all-errors -o "$CACHE/$f.part" "$ALPINE_BASE/$f"
-    mv "$CACHE/$f.part" "$CACHE/$f"
 }
 
 STAGE=$(mktemp -d "${TMPDIR:-/tmp}/umarm-rootfs.XXXXXX")

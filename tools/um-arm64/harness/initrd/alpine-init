@@ -1,0 +1,64 @@
+#!/bin/sh
+# /init for the Alpine initramfs.
+#
+# This is the guest the app boots when it has no disk image: dist/umapp passes
+# `init=/init` and wires con0 to its own terminal, so the shell at the bottom is
+# the whole of the user interface. It is also the fixture the CI gate boots, which
+# is why the self-check exists.
+#
+# The self-check is not decoration. An initramfs that boots into a shell nobody
+# can type into is not testable, so the gate asks for one with
+# umarm.initrd.test=1 on the command line. And busybox is a *dynamic* musl
+# binary: if it runs at all, the archive carried busybox, the musl loader, libc
+# and the symlinks that point at them -- which is the difference between an
+# initramfs that is complete and one that merely contains files.
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+export PATH
+
+mkdir -p /proc /sys /dev /tmp 2>/dev/null
+mount -t proc     proc     /proc 2>/dev/null
+mount -t sysfs    sysfs    /sys  2>/dev/null
+mount -t devtmpfs devtmpfs /dev  2>/dev/null
+mount -t tmpfs    tmpfs    /tmp  2>/dev/null
+
+hostname umarm 2>/dev/null
+
+if grep -q 'umarm.initrd.test=1' /proc/cmdline 2>/dev/null; then
+	fail() {
+		echo "UMARM_INITRD_FAIL: $*"
+		sync
+		poweroff -f
+	}
+
+	[ -r /proc/self/stat ] || fail "procfs is not mounted"
+
+	bb=$(busybox 2>&1 | head -1) || fail "busybox did not run"
+	case "$bb" in
+	BusyBox*v*) ;;
+	*) fail "busybox said: $bb" ;;
+	esac
+
+	[ -r /etc/alpine-release ] || fail "no /etc/alpine-release"
+	rel=$(cat /etc/alpine-release)
+
+	# The root filesystem is the initramfs itself, which is what makes this a
+	# different gate from every other one: there is no ubd device and no mount.
+	# The kernel's internal rootfs is ramfs, not rootfs -- that is what
+	# initramfs_unpack() unpacks into -- and the first version of this check
+	# asserted the name I had guessed instead of the one it is.
+	case "$(stat -f -c %T / 2>/dev/null)" in
+	ramfs|rootfs|tmpfs) ;;
+	*) fail "/ is $(stat -f -c %T / 2>/dev/null), expected ramfs" ;;
+	esac
+	# And the thing that actually distinguishes it: no block device was
+	# attached, so nothing here came off a disk.
+	[ -e /dev/ubda ] && fail "/dev/ubda exists, so this is not an initramfs boot"
+
+	echo "UMARM_INITRD_OK alpine=$rel | $bb | $(uname -m) $(uname -r)"
+	sync
+	poweroff -f
+fi
+
+# The app's initramfs-only build: a login shell on the console it was given.
+exec /bin/sh -l
