@@ -217,6 +217,12 @@ jobs:
       - name: Fetch and unpack the NDK
         run: |
           set -euo pipefail
+          # The zip lives under the workspace so its cache path can be absolute
+          # and context-free (see the job-level env), which means the directory
+          # has to exist first: curl reports a missing one as
+          # "curl: (23) Failure writing output to destination", naming neither
+          # the path nor the reason.
+          mkdir -p "$(dirname "$NDK_ZIP")"
           if [ ! -f "$NDK_ZIP" ]; then
             echo "downloading $ANDROID_NDK_URL"
             curl -fsSL --retry 3 --retry-all-errors -o "$NDK_ZIP.part" "$ANDROID_NDK_URL"
@@ -229,6 +235,7 @@ jobs:
           ls -d "$NDK_HOME"/android-ndk-* >/dev/null
           "$NDK_HOME"/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin/clang \
              --version | head -1
+          df -h "$NDK_HOME" || true
 
       # Only when it was a miss: saving a key that already exists is an error.
       - name: Save the NDK archive
