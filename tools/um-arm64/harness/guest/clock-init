@@ -12,26 +12,23 @@
 #
 # Run as: init=/clock-init ubd0=alpine.ext4 root=/dev/ubda rw
 
-SECS=${CLOCK_SECS:-30}
-
 fail() { echo "GATECLOCK_FAIL: $*"; }
 
 mkdir -p /proc /sys /dev 2>/dev/null
 mount -t proc proc /proc 2>/dev/null
 
 command -v clockcheck >/dev/null 2>&1 || {
-	fail "clockcheck is not in the guest image"
+	fail "clockprobe is not in the guest image"
 	exit 1
 }
 
-echo "CLOCKCHECK_BEGIN secs=$SECS"
-clockcheck "$SECS"
+clockprobe
 rc=$?
 case "$rc" in
 0) ;;
-*) fail "clockcheck exited $rc" ;;
+*) fail "clockprobe exited $rc" ;;
 esac
 
-echo "UMARM_BOOT_OK clock_secs=$SECS"
+echo "UMARM_BOOT_OK"
 [ -x /umarm-poweroff ] && /umarm-poweroff
 exit 0
