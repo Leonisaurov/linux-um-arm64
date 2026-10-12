@@ -322,6 +322,15 @@ filter was written for, so `android` builds the same kernel against the NDK:
   symbol took effect after `olddefconfig`, because `scripts/config -e` on a name
   that does not exist warns and carries on, and the failure would then be a kernel
   that boots everywhere except the host it was built for.
+* **A docker kernel, 16 KB only.** Docker is a set of kernel features --
+  namespaces, cgroup v2, overlayfs, veth/bridge, nftables -- that
+  `arm64_defconfig` does not turn on, so it needs a third build with
+  `EXTRA_CONFIG=config/docker.config`, shipped as `16k/linux-um-docker`. The
+  `build` job makes the same config against glibc for the `docker-prereqs`
+  gate, but a glibc kernel needs an interpreter Termux does not have; this is
+  the libc the phone runs, so `tools/um-arm64/alpine-um` runs containers with no
+  wrapper. One page size is enough because a 16 KB guest page boots on 4 KB
+  hosts too.
 * **`stub_exe` ships with it**, because an Android domain refuses `execveat()` on
   a memfd; without it the kernel exits having printed nothing.
 * **What is missing is `passt`.** `harness/build-net-bionic.sh` builds the two

@@ -244,6 +244,14 @@ if [ ! -e /sys/fs/cgroup/cgroup.controllers ]; then
 	mkdir -p /sys/fs/cgroup
 	mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null
 fi
+# /run is a real directory in this image, not a tmpfs, so a daemon killed by the
+# poweroff leaves its state behind. dockerd complains about /run/docker.pid and
+# /run/docker.sock; its managed containerd keeps /run/docker/containerd/ and is
+# the one that actually stops the second boot, with
+#   failed to save daemon pid to disk: process with PID N is still running
+# because the PID in the stale pidfile has been reused. Both trees are pure
+# runtime state -- dockerd recreates them -- so they go.
+rm -rf /var/run/docker /var/run/containerd
 rm -f /var/run/docker.pid /var/run/docker.sock
 mkdir -p /var/log
 if ! command -v dockerd >/dev/null 2>&1; then

@@ -24,6 +24,10 @@ things Android otherwise denies it:
   inside it on a host that refuses `/dev/kvm`. The prerequisites are what the
   `docker-prereqs` CI gate pins, because that is where a variant of this port
   once claimed "docker starts and runs" while every container create failed.
+  `tools/um-arm64/alpine-um` is the launcher for it: an Alpine image with
+  Docker installed and the guest network up, where `docker run --rm
+  hello-world` pulls the image and runs it; `doc/80-docker-alpine.md` is the
+  guide.
 * **Kernel work without a device.** The guest is a process on whatever machine
   you already have: `gdb` attaches to it, a boot is a second rather than a
   minute, and the same binary runs on a Pi, a runner, or the phone. That is what
