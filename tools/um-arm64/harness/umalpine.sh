@@ -29,6 +29,7 @@
 #   UMALPINE_MEM (default 512M)   UMALPINE_INIT (default /umarm-init)
 #   UMALPINE_NET=0                boot without the network helpers
 #   UMALPINE_DOCKER=1             same as --docker
+#   UMALPINE_HOSTNAME             guest hostname (default umalpine)
 #   UMALPINE_SHARE                host directory shared with the guest as /host
 set -uo pipefail
 
@@ -208,13 +209,31 @@ maybe_configure_kernel || die "could not make $KERNEL runnable on this host"
 # --- the host share the guest mounts as /host -------------------------------
 SHARE=${UMALPINE_SHARE:-${TMP%/}/umalpine-share}
 mkdir -p "$SHARE" || die "cannot create share directory $SHARE"
-rm -f "$SHARE/cmd" "$SHARE/umalpine-net.sh" "$SHARE/umalpine-docker.sh" 2>/dev/null
+rm -f "$SHARE/cmd" "$SHARE/umalpine-net.sh" "$SHARE/umalpine-docker.sh" \
+	"$SHARE/umalpine-hostname" 2>/dev/null
+
+# The kernel's hostname is CONFIG_DEFAULT_HOSTNAME until userspace calls
+# sethostname(2), and the default is the literal "(none)" (init/Kconfig). A real
+# distro has an init that reads /etc/hostname and sets it; this minirootfs has no
+# init at all, so Alpine's PS1 -- '\h:\w\$ ' -- says (none):~#. The name travels
+# through the share as a file rather than interpolated into the injected script,
+# so quoting the operator's value is not the script's problem.
+HOSTNAME_NAME=${UMALPINE_HOSTNAME:-umalpine}
+printf '%s\n' "$HOSTNAME_NAME" > "$SHARE/umalpine-hostname"
 
 # The network script is injected through hostfs, not baked into the image, so
 # the DHCP logic can change without rebuilding the disk. /umarm-init mounts the
 # share and runs /host/cmd, which sources this.
 cat > "$SHARE/umalpine-net.sh" <<'NET'
 #!/bin/sh
+# Name the machine first, so it is set even when there is no NIC to bring up.
+# UMALPINE_NET=0 makes the rest of this script exit early, and the hostname
+# should not depend on the network having been requested.
+if [ -r /host/umalpine-hostname ]; then
+	read -r _hn < /host/umalpine-hostname
+	[ -n "$_hn" ] && echo "$_hn" > /proc/sys/kernel/hostname 2>/dev/null
+fi
+
 # Bring the UML vector NIC (vec0) up, get a DHCP lease and DNS.
 IF=vec0
 [ -d "/sys/class/net/$IF" ] || IF=$(ls /sys/class/net 2>/dev/null | grep -v '^lo$' | head -1)

@@ -42,7 +42,11 @@ mano:
 
 Igual que `umalpine.sh`, acepta `-c 'CMD'` para un comando y sin `-c` deja una
 shell; `UMALPINE_MEM`, `UMALPINE_KERNEL`, `UMALPINE_IMAGE`, `UMALPINE_SHARE` y
-`UMALPINE_DOCKER=1` funcionan igual. En Termux no hay `/bin/bash`, así que se
+`UMALPINE_DOCKER=1` funcionan igual. `UMALPINE_HOSTNAME` (default `umalpine`)
+es el nombre del guest: sin él el prompt sale `(none):~#`, porque el hostname del
+kernel es `CONFIG_DEFAULT_HOSTNAME` -- el default del árbol es el literal
+`(none)` (`init/Kconfig`) -- hasta que alguien llama `sethostname(2)`, y esta
+minirootfs no tiene init que lo haga. En Termux no hay `/bin/bash`, así que se
 invoca con `bash alpine-um`.
 
 ## 1. La imagen (el ext)
