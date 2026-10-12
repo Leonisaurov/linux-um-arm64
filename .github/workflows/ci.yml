@@ -396,6 +396,26 @@ jobs:
           export NAME=linux-um STUBNAME=stub_exe PAGESIZE=4k API="$ANDROID_API"
           bash tools/um-arm64/harness/build-bionic.sh
 
+      # The docker kernel, bionic rather than glibc. Docker is a set of kernel
+      # features -- namespaces, cgroup v2, overlayfs, veth, bridge, nftables --
+      # that arm64_defconfig does not enable, so it needs its own build. The
+      # `build` job makes a glibc one for the gate; that kernel needs an
+      # interpreter Termux does not have, and this is the same config against
+      # the libc the phone runs. Only at 16 KB: a 16 KB guest page boots on
+      # 4 KB and 16 KB hosts alike, and a second copy would only add bytes to
+      # an artifact meant to be downloaded. `tools/um-arm64/alpine-um` picks it
+      # up by name when it sits next to the image.
+      - name: Build the bionic docker kernel (16 KB pages)
+        run: |
+          set -euo pipefail
+          export NDK="$NDK_HOME/android-ndk-r27c"
+          export O="$RUNNER_TEMP/bionic-docker"
+          export ART="$RUNNER_TEMP/android/16k"
+          export CCACHE_DIR="$RUNNER_TEMP/ccache-bionic"
+          export NAME=linux-um-docker STUBNAME=stub_exe PAGESIZE=16k API="$ANDROID_API"
+          export EXTRA_CONFIG=tools/um-arm64/config/docker.config
+          bash tools/um-arm64/harness/build-bionic.sh
+
       - name: Build the bionic networking helpers
         run: |
           set -euo pipefail
@@ -451,6 +471,14 @@ jobs:
             echo
             echo "Each holds \`linux-um\` (the kernel), \`stub_exe\`, \`deb\` (the launcher) and"
             echo "\`install.sh\`, with the numbers for that binary in \`linux-um.build.txt\`."
+            echo
+            echo "\`16k/\` additionally holds \`linux-um-docker\`, the same kernel built"
+            echo "with \`tools/um-arm64/config/docker.config\`: namespaces, cgroup v2,"
+            echo "overlayfs, veth/bridge and nftables, which is what running containers"
+            echo "needs. It is bionic like the others, so it runs here with no glibc and"
+            echo "no wrapper. \`tools/um-arm64/alpine-um\` boots an Alpine image with it,"
+            echo "brings up dockerd and gives you a shell; see"
+            echo "\`tools/um-arm64/doc/80-docker-alpine.md\`."
             echo
             echo "\`stub_exe\` is not optional on Android: UML normally writes its stub into"
             echo "a memfd and \`execveat\`s it, which an app or shell domain refuses. Without it"
