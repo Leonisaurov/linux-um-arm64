@@ -482,9 +482,17 @@ because two of these are cheap while looking expensive.
    the clock rate) is done and gated; what remains is the choice between building
    a syscall-stub vDSO for ABI completeness or leaving it, and the README no
    longer claims anything false either way.
-6. **Untested, named so they are not assumed to work:** `docker compose`,
-   rootless Docker, more than one CPU, daemon state across a guest reboot,
-   `UMALPINE_NET=0`, the 4 KB kernel under the wrapper.
+6. ~~**Untested, named so they are not assumed to work:**~~ **reviewed**, with
+   the results in doc/80-docker-alpine.md. `docker compose` (v2.31.0, pulled
+   `nginx:alpine`, published a port, served it), `-p`, custom networks and
+   container-to-container by name, `--network host`, the `nft` binary and the
+   4 KB kernel under the wrapper all work. Two did not: `rc-service docker`
+   does not start the daemon in this minirootfs (openrc never booted the
+   system; `dockerd` by hand does), and **user namespaces are non-functional**
+   -- `unshare(CLONE_NEWUSER)` returns 0 but the next `execve` fails `EACCES`
+   on a `root:root 0755` file, so `CONFIG_USER_NS=y` buys nothing and rootless
+   Docker / `--userns-remap` cannot work. The root cause is not found. Still
+   untested: more than one CPU (UML is uniprocessor) and a 16 KB host.
 7. **The `g3-noaslr` transient** is refuted as a leak and explained as a host
    condition, which means there is nothing to fix unless it recurs. If it does,
    the verdict now keeps the guest's own explanation instead of saying SIGNAL.

@@ -202,11 +202,60 @@ el kernel tiene `vec0`, `udhcpc` pide el lease, y `dockerd` sale por el
    con `patchelf --print-interpreter` y lo hace solo; con el bionic no pasa
    nada.
 
-## Lo que NO probé
+## Revisión de la lista de no verificados (2026-10-12)
 
-* `docker compose`, rootless, más de una CPU, `--network host`/puertos,
-  contenedores que hablen a la red o entre sí más allá de `hello-world`.
-* `openrc`/`rc-service docker` y si existe un `docker-openrc`.
-* El kernel de 4 KB bajo el lanzador (la imagen es la misma; lo que cambia es
-  la página del guest) y un host de 16 KB.
-* `nft` como binario (no instalado; `iptables v1.8.11 (nf_tables)` sí está).
+Revisado en el teléfono con el kernel bionic, sobre la misma imagen. Dos de los
+primeros intentos dieron "fallas" que eran del fixture y no de UM: el busybox
+que trae la imagen `alpine` **no tiene el applet `httpd`** (`applet not found`),
+así que el contenedor moría y `-p` respondía "connection refused". Con un
+servidor que existe (`nc`) el resultado cambia. Todo lo de abajo se probó con
+`nc` o con `nginx:alpine`, no con un fixture que no arranca.
+
+| lo que estaba sin verificar | resultado |
+| --- | --- |
+| `nft` como binario | ✅ `nftables v1.1.1`, tablas `ip nat/filter` y `ip6 nat/filter` |
+| `-p` / publicación de puertos | ✅ `0.0.0.0:8080->80/tcp`, `wget 127.0.0.1:8080` → `PORT_OK`, y la regla `DNAT` visible en `ip nat DOCKER` |
+| red custom + contenedor↔contenedor | ✅ `by_ip=NET_OK` y `by_name=NET_OK`: el DNS embebido (127.0.0.11) resuelve el nombre |
+| internet del contenedor | ✅ NAT `docker0` → `vec0` → passt |
+| `--network host` | ✅ comparte el netns del guest y llega a `example.com` |
+| `docker compose` | ✅ v2.31.0: bajó `nginx:alpine`, publicó `8081→80`, sirvió el HTML y `down` limpió red y contenedor |
+| kernel de 4 KB bajo el lanzador | ✅ `getconf PAGESIZE=4096`, boot y red |
+| `openrc`/`rc-service docker` | ⚠️ el servicio existe (`/etc/init.d/docker`), pero `rc-service docker start` no arranca `dockerd` en esta minirootfs (`docker is already starting`; openrc no booteó el sistema). `dockerd` a mano —lo que hace el launcher— sí |
+| host de 16 KB | ⚪ no testeable acá: el teléfono tiene páginas de 4 KB. Lo que sí corre es el guest de 16 KB sobre un host de 4 KB |
+
+No hay kernel de 4 KB **con** `docker.config`: se construye sólo el de 16 KB
+porque un guest de 16 KB bootea en hosts de 4 y de 16 KB, y una segunda copia
+sólo agrega bytes al artifact. El de 4 KB que se probó es el `linux-um` de
+default, es decir el camino sin Docker.
+
+## User namespaces: `CONFIG_USER_NS=y` pero no funcionan
+
+`docker.config` enciende `CONFIG_USER_NS=y` para rootless Docker y
+`--userns-remap`, y el comentario de ahí dice que el guest "es libre de
+tenerlo". Lo tiene en el config, y **no funciona**:
+
+    # unshare -U /bin/busybox true
+    unshare: can't execute '/bin/busybox': Permission denied
+
+`strace` lo aísla:
+
+    unshare(CLONE_NEWUSER)                                = 0
+    execve("/bin/busybox", ["/bin/busybox", "true"], ...) = -1 EACCES (Permission denied)
+
+El namespace **se crea** (`unshare` da 0) y el `execve` siguiente falla con
+`EACCES` aunque el archivo es `root:root 0755` y el mismo `execve` funciona sin
+el `unshare`. Pasa con `-U`, `-Ur` y `--map-root-user`, y un `execve` de un path
+inexistente da `ENOENT`, así que el camino de exec se alcanza: el `EACCES` es
+del kernel, no de los bits de permiso.
+
+La causa raíz no está encontrada; queda como bug abierto del puerto.
+Consecuencia práctica: rootless Docker y `--userns-remap` **no** son usables
+acá, por más que el símbolo esté en `.config`. Los contenedores comunes
+(namespaces de red/PID/mount, sin userns) sí andan, que es todo lo que el
+launcher y el gate necesitan.
+
+## Lo que sigue sin probar
+
+* Un host de 16 KB (no hay uno a mano; el guest de 16 KB sobre 4 KB sí se probó).
+* Más de una CPU: UML es uniprocesador, no hay `cpuset` que probar.
+* La causa raíz del `EACCES` de userns, y arreglarla.
