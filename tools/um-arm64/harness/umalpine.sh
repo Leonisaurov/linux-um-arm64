@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # umalpine.sh -- boot a minimal Alpine guest inside this UML, with internet,
 # and leave you in a shell.
 #
