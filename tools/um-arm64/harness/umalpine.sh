@@ -244,6 +244,14 @@ if [ ! -e /sys/fs/cgroup/cgroup.controllers ]; then
 	mkdir -p /sys/fs/cgroup
 	mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null
 fi
+# The bridge and veth drivers log every port state change at KERN_INFO, and the
+# guest console prints whatever is at or above console_loglevel. At the default
+# (7) a one-line `docker run` is buried under a dozen "docker0: port 1(veth...)
+# entered blocking state" lines. Raising the threshold to 4 keeps warnings,
+# errors and BUGs -- which is what the port's own gates scan for -- and drops
+# the INFO chatter. `dmesg -n 4` is the same thing with busybox, but writing the
+# sysctl is one less thing to depend on.
+[ -w /proc/sys/kernel/printk ] && echo 4 > /proc/sys/kernel/printk
 # /run is a real directory in this image, not a tmpfs, so a daemon killed by the
 # poweroff leaves its state behind. dockerd complains about /run/docker.pid and
 # /run/docker.sock; its managed containerd keeps /run/docker/containerd/ and is

@@ -112,6 +112,7 @@ Lo que el modo inyecta por hostfs (y que se puede leer en
     rm -f /var/run/docker.pid /var/run/docker.sock
     mkdir -p /sys/fs/cgroup
     mount -t cgroup2 none /sys/fs/cgroup
+    echo 4 > /proc/sys/kernel/printk    # el KERN_INFO del bridge/veth, fuera
     dockerd > /var/log/dockerd.log 2>&1 &
 
 El transcript del arranque, con el kernel bionic:
@@ -181,10 +182,18 @@ el kernel tiene `vec0`, `udhcpc` pide el lease, y `dockerd` sale por el
 5. **Sin `mount -t cgroup2` no hay controllers.** El minirootfs no tiene init
    que lo monte; `docker info` sale con `Cgroup Version: 2` pero sin `cpu io
    memory pids` y los containers fallan al crear.
-6. **El shebang es `#!/bin/bash`.** Termux no tiene `/bin/bash` ni
+6. **La consola se come la salida de `docker run`.** El driver bridge y veth
+   loguean cada cambio de estado de puerto en `KERN_INFO` ("docker0: port
+   1(veth...) entered blocking state"), y la consola del guest imprime todo lo
+   que esté ≥ `console_loglevel` (7 por defecto). Un `docker run alpine echo
+   hello` queda enterrado en una docena de líneas del kernel. El bring-up
+   escribe `echo 4 > /proc/sys/kernel/printk`: sube el umbral a `KERN_WARNING`,
+   así que warnings, errores y BUGs siguen saliendo -- que es lo que escanean
+   los gates -- y el INFO se calla.
+7. **El shebang es `#!/bin/bash`.** Termux no tiene `/bin/bash` ni
    `/usr/bin/env`; se invoca con `bash alpine-um`. Es la misma convención que
    el resto del harness.
-7. **El kernel glibc necesita `grun --configure`.** Sin eso, Termux no tiene
+8. **El kernel glibc necesita `grun --configure`.** Sin eso, Termux no tiene
    `/lib/ld-linux-aarch64.so.1` y el kernel no arranca. El lanzador lo detecta
    con `patchelf --print-interpreter` y lo hace solo; con el bionic no pasa
    nada.
