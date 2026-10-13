@@ -174,6 +174,7 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         /* --- the terminal --- */
+        fontSizeSp = prefs.getInt("font", 12);
         terminalView = new TerminalView(this, null);
         terminalView.setTerminalViewClient(this);
         terminalView.setFocusable(true);
