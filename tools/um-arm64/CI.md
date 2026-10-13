@@ -4,6 +4,20 @@ The pipeline lives in `.github/workflows/ci.yml` and its two helpers,
 `harness/ci-build.sh` and `harness/native.sh`, plus the gate fixture built by
 `harness/mkinitramfs.sh`.
 
+## What triggers it
+
+Only code. `push` and `pull_request` carry a `paths-ignore` for documentation
+and metadata -- `*.md`, `**/*.md` (which is where the port's own docs in
+`tools/um-arm64/doc/` live), `Documentation/**`, `LICENSES/**`, `COPYING`,
+`CREDITS`, `MAINTAINERS`, `.mailmap` -- so a commit that only touches those
+starts no run at all: it could not have invalidated a kernel, and the run it
+would have paid for proves nothing. The rule is GitHub's: the workflow is
+skipped only when **every** changed file matches; a commit with a `.c` file and
+a `.md` file still runs. Everything else triggers it, including
+`tools/um-arm64/harness/`, `/config/` and `/dist/`, which are code and are
+deliberately not on the list. `schedule` and `workflow_dispatch` ignore the
+filter and always run, which is why the weekly flake loop is unaffected.
+
 ## Why there is no qemu here
 
 The port's documents (`doc/00-environment-and-deviations.md`,

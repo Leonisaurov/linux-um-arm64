@@ -14,11 +14,40 @@ name: um-arm64 CI
 # *host* side of the boundary they test (LD_PRELOAD shim loaded, hostfs write
 # visible, guest compiler output correct).
 
+# Only code triggers this. The workflow builds a kernel and boots it, so a
+# change to documentation, licences or the maintainer metadata cannot invalidate
+# anything it produces -- and a run that proves nothing still costs seven
+# minutes and a runner. `paths-ignore` skips the whole workflow when *every*
+# changed file is one of these; a commit that touches a .c file and a .md file
+# still runs.
+#
+# The port's own documentation lives in tools/um-arm64/doc/ and its files are
+# .md, so they are covered by the first pattern. tools/um-arm64/harness/,
+# /config/ and /dist/ are code and are deliberately not ignored, and neither is
+# anything under the kernel tree.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '*.md'
+      - '**/*.md'
+      - 'Documentation/**'
+      - 'LICENSES/**'
+      - 'COPYING'
+      - 'CREDITS'
+      - 'MAINTAINERS'
+      - '.mailmap'
   pull_request:
     branches: [main]
+    paths-ignore:
+      - '*.md'
+      - '**/*.md'
+      - 'Documentation/**'
+      - 'LICENSES/**'
+      - 'COPYING'
+      - 'CREDITS'
+      - 'MAINTAINERS'
+      - '.mailmap'
   # The flake loop is a campaign rather than a gate: 200 iterations is about
   # twenty minutes, and a loop that runs on every push is a loop people turn off.
   # Weekly, and on demand with a smaller n when the wiring itself is what is
