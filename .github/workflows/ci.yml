@@ -227,8 +227,12 @@ jobs:
           bash tools/um-arm64/harness/mkdockerimage.sh "$ART/alpine-docker.ext4"
           # Gzipped for the APK, not shrunk to the minimum: the image is a
           # working guest, and a filesystem with no free blocks cannot pull an
-          # image. The zero blocks cost almost nothing in the archive.
+          # image. The zero blocks cost almost nothing in the archive. The raw
+          # ext4 is not uploaded -- every boot-matrix row downloads this
+          # artifact, and the one row that boots this image gunzips it; the
+          # difference is half the transfer.
           gzip -6 -c "$ART/alpine-docker.ext4" > "$ART/alpine-docker.ext4.gz"
+          rm -f "$ART/alpine-docker.ext4"
           ls -la "$ART"/alpine-docker.ext4*
 
       - name: Build initramfs gate fixture
@@ -972,6 +976,15 @@ jobs:
           sudo apt-get install -y -qq --no-install-recommends debootstrap e2fsprogs
           DISTRO=debian SIZE=2G \
             bash tools/um-arm64/harness/mkrootfs.sh "$RUNNER_TEMP/artifacts/debian.ext4"
+
+      # The docker image travels gzipped to keep the artifact every matrix row
+      # downloads small; only the rc-docker row pays to unpack it.
+      - name: Unpack the docker image
+        if: matrix.ubd0 == 'alpine-docker.ext4'
+        run: |
+          set -euo pipefail
+          gunzip -kf "$RUNNER_TEMP/artifacts/alpine-docker.ext4.gz"
+          ls -la "$RUNNER_TEMP/artifacts/alpine-docker.ext4"
 
       - name: Boot gate
         run: |
