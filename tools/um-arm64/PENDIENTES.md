@@ -51,6 +51,17 @@ Para retomar: *"seguí con los pendientes de tools/um-arm64/PENDIENTES.md"*.
 - **Más de una CPU**: UML es uniprocesador; no hay `cpuset` que probar.
 - La **causa raíz** del `EACCES` de userns (punto 1).
 
+## CI
+
+`.github/workflows/ci.yml` corre la matriz completa (~7-9 min) y **sólo se
+dispara con cambios de código**: `push` y `pull_request` tienen `paths-ignore`
+para `*.md`, `**/*.md`, `Documentation/**`, `LICENSES/**`, `COPYING`,
+`CREDITS`, `MAINTAINERS` y `.mailmap`. Un commit que sólo toca esos archivos no
+inicia ningún run (GitHub saltea sólo si *todos* los archivos cambiados están en
+la lista). `schedule` y `workflow_dispatch` no llevan filtro y siempre corren,
+así que el flake semanal queda igual. Si querés forzar los gates para un commit
+de docs, ya no alcanza con pushear: usá `workflow_dispatch`.
+
 ## Entorno, para no rearmarlo
 
 - Launcher: `~/.local/bin/alpine-um` (wrapper con shebang de Termux) →
