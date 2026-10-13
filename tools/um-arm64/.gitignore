@@ -8,11 +8,13 @@ probe/*
 # what belongs in the tree is the source that produces them.
 artifacts/
 rootfs/
+# The debug signing key, dist/umapp/debug.keystore, is deliberately NOT here:
+# it is committed so an APK can update a previous install. See build-apk.sh.
+artifacts/
+rootfs/
 dist/umapp/build/
 dist/umapp/umarm.apk
 dist/umapp/umarm.apk.idsig
-# A debug signing key, generated on first use. Never committed.
-dist/umapp/debug.keystore
 dist/umdebian/umnet
 dist/umdebian/passt
 dist/umdebian/appseccomp

@@ -173,6 +173,13 @@ zip -q -0 -r staged.apk lib
 zip -q -9 -r staged.apk assets
 
 echo "== signing =="
+# debug.keystore is committed, not generated per build. Android refuses to
+# update an app whose signing certificate changed -- the install fails with
+# INSTALL_FAILED_UPDATE_INCOMPATIBLE, which reads as a certificate error -- and
+# a key generated on first use changes the moment the file is lost or the build
+# moves to another machine or CI runner. It is a self-signed debug key with a
+# public password; that is all it is. The keytool line is the fallback for a
+# tree that somehow lacks it.
 KS="$HERE/debug.keystore"
 if [ ! -f "$KS" ]; then
 	keytool -genkeypair -keystore "$KS" -storepass umarmumarm -keypass umarmumarm \
