@@ -117,6 +117,14 @@ for f in "$HERE"/guest/*; do
     in_stage install -m 0755 "$f" "$STAGE/$(basename "$f")"
 done
 
+# The Alpine image's PID 1 is the Alpine script, not the Debian one that
+# guest/umarm-init is: this loop installs the whole guest directory into both
+# distros, so the Debian init lands in the Alpine tree too. Put the right one
+# back under the name both launchers boot (init=/umarm-init).
+if [ "$DISTRO" = alpine ]; then
+    in_stage install -m 0755 "$HERE/guest/umarm-init-alpine" "$STAGE/umarm-init"
+fi
+
 compile_probe() {
     local src=$1 name=$2 tmp
 
@@ -155,9 +163,28 @@ compile_probe "$HERE/probe/stubfork.c" stubfork
 # e2fsprogs refuses to overwrite an existing filesystem unless forced, and CI
 # reuses $OUT across attempts. The Debian tree carries device nodes and root
 # ownership from debootstrap, so that image is written with the same privilege
-# debootstrap needed; the Alpine image is written unprivileged.
+# debootstrap needed.
+#
+# The Alpine tree needs the same treatment for a reason that is not housekeeping.
+# tar cannot restore the tarball's root:root without privilege, so an
+# unprivileged extraction leaves the whole tree owned by the build user -- and
+# the directories 0700, because that is what the extraction umask and the umask
+# of whoever created them produce. mke2fs -d records whatever lstat(2) reports,
+# so a non-root build bakes that ownership into the image. The guest root gets
+# away with it through CAP_DAC_OVERRIDE, which is why every gate but one passes;
+# inside a user namespace the on-disk uid has no mapping, capable_wrt_inode_uidgid()
+# fails, and unshare(CLONE_NEWUSER) followed by any execve returns EACCES. That
+# was reported as a kernel bug and is harness/guest/userns-init's subject.
+if [ "$DISTRO" = alpine ]; then
+    $SUDO chown -R 0:0 "$STAGE"
+    $SUDO find "$STAGE" -type d -exec chmod 0755 {} +
+fi
+
 MKE2FS=()
 [ "$DISTRO" = debian ] && MKE2FS=("$SUDO")
+# mke2fs has to see the fixed ownership, so it runs with the same privilege the
+# chown needed on the Alpine path too.
+[ "$DISTRO" = alpine ] && MKE2FS=("$SUDO")
 rm -f "$OUT"
 "${MKE2FS[@]}" mke2fs -q -F -t ext4 -b 4096 -L "umarm-$DISTRO" -d "$STAGE" "$OUT" "$SIZE"
 

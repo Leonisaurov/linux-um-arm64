@@ -486,13 +486,20 @@ because two of these are cheap while looking expensive.
    the results in doc/80-docker-alpine.md. `docker compose` (v2.31.0, pulled
    `nginx:alpine`, published a port, served it), `-p`, custom networks and
    container-to-container by name, `--network host`, the `nft` binary and the
-   4 KB kernel under the wrapper all work. Two did not: `rc-service docker`
-   does not start the daemon in this minirootfs (openrc never booted the
-   system; `dockerd` by hand does), and **user namespaces are non-functional**
-   -- `unshare(CLONE_NEWUSER)` returns 0 but the next `execve` fails `EACCES`
-   on a `root:root 0755` file, so `CONFIG_USER_NS=y` buys nothing and rootless
-   Docker / `--userns-remap` cannot work. The root cause is not found. Still
-   untested: more than one CPU (UML is uniprocessor) and a 16 KB host.
+   4 KB kernel under the wrapper all work. The two that did not are now closed,
+   and neither was a kernel bug: `rc-service docker` did not start the daemon
+   because the image shipped `/etc/runlevels/*` empty and no
+   `/etc/network/interfaces`, so docker's `need sysfs cgroups net` could never
+   be satisfied; and **user namespaces** failed because the Alpine minirootfs
+   had been extracted unprivileged, leaving `/bin` and `/lib` owned by the
+   build user and mode 0700 -- root reaches them through `CAP_DAC_OVERRIDE`,
+   which a process in a user namespace loses for an unmapped on-disk uid, so
+   the exec after `unshare(CLONE_NEWUSER)` returned `EACCES`. Both are fixed in
+   the image builders (`chown -R 0:0` and the runlevel/interfaces setup) and
+   gated (`harness/guest/userns-init`, `harness/guest/rc-docker-init`). Still
+   untested, as null results: more than one CPU (UML is uniprocessor, so there
+   is no `cpuset` to test) and a 16 KB host (no such machine in Termux; the
+   Raspberry Pi 5 in §2b is the one to use).
 7. **The `g3-noaslr` transient** is refuted as a leak and explained as a host
    condition, which means there is nothing to fix unless it recurs. If it does,
    the verdict now keeps the guest's own explanation instead of saying SIGNAL.

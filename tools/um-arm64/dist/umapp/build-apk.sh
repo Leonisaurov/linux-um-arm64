@@ -62,6 +62,11 @@ APK=${APK:-$HERE/umarm.apk}
 BINARIES=(
 	"$ROOT/artifacts/linux-bionic:libuml.so"
 	"$ROOT/artifacts/stub_exe_bionic:libstub.so"
+	# The pty half of the terminal: Termux's terminal-emulator fork/execs the
+	# "shell" -- here the kernel -- on a pseudoterminal, which is what makes the
+	# guest console a real tty instead of a pipe. Unlike every other entry here it
+	# is an ordinary shared object, loaded with System.loadLibrary("termux").
+	"$ROOT/artifacts/libtermux_bionic:libtermux.so"
 	# A scratch slot for probes: whatever is here can be exec'd in the app's
 	# own uid and SELinux domain via `run-as`, which /data/local/tmp cannot be.
 	"$ROOT/artifacts/sockprobe_bionic:libprobe.so"
@@ -101,7 +106,7 @@ for b in "${BINARIES[@]}"; do
 	src=${b%%:*}; dst=${b##*:}
 	if [ -f "$src" ]; then
 		cp -f "$src" "$OUT/lib/arm64-v8a/$dst"
-		printf '   %-14s %s\n' "$dst" "$(du -h "$src" | cut -f1)"
+		printf '   %-14s %s\n' "$dst" "$(du -hL "$src" | cut -f1)"
 	else
 		echo "   WARNING: $src missing, $dst will be absent"
 	fi
@@ -122,11 +127,18 @@ echo "== compiling =="
 # pipeline. `cmd | grep -v ... | head` cannot report failure under pipefail --
 # and worse, grep -v exits 1 when it filters everything away, so a *clean*
 # javac aborted the script once set -e was added.
+# The vendored Termux terminal lives in com.termux.view / com.termux.terminal
+# and refers to its own R class by those package names -- which is what a Gradle
+# library module gets for free and this single-package, no-Gradle build does not.
+# --extra-packages makes aapt2 emit the same R again under those names, so the
+# sources resolve without the app's build growing a module system.
 if ! "$BT/aapt2" link \
 	-o "$OUT/base.apk" \
 	-I "$ANDROID_JAR" \
 	--manifest "$HERE/AndroidManifest.xml" \
 	--java "$OUT/classes" \
+	--extra-packages com.termux.view \
+	--extra-packages com.termux.terminal \
 	${ROOTFS_GZ:+} \
 	"$OUT/res.zip" > "$OUT/aapt2.log" 2>&1; then
 	echo "aapt2 link failed:" >&2

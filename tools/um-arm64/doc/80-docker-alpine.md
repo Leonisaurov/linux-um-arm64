@@ -26,19 +26,23 @@ nombre: el nombre es el que activa el modo `--docker`. Ver §0.
     bash alpine-um                                     # el nombre implica --docker
 
 `alpine-um` es el mismo archivo que `umalpine.sh`, copiado con ese nombre en el
-directorio donde viven las piezas. Hace las cuatro cosas que antes se hacían a
-mano:
+directorio donde viven las piezas. Hace tres cosas:
 
 1. **elige el kernel** con `config/docker.config` (busca `linux-um-docker` y
    después el glibc `linux`),
 2. **elige la imagen** con Docker (`alpine.ext4` / `alpine-docker.ext4`), antes
-   de la Alpine pelada,
-3. **monta cgroup2 y arranca `dockerd`** dentro del guest, borrando antes el
-   estado de `/run/docker` y `/run/containerd` que deja un daemon matado
-   (trampa 4), y
-4. **apunta el kernel a la glibc de Termux** con `grun --configure` *solo si el
+   de la Alpine pelada, y
+3. **apunta el kernel a la glibc de Termux** con `grun --configure` *solo si el
    kernel es glibc y el intérprete no existe*. En un kernel bionic estático
    `patchelf --print-interpreter` no imprime nada y el paso es un no-op.
+
+Lo que **no** hace más es arrancar `dockerd`: eso pasó a `/umarm-init`
+(`harness/guest/umarm-init-alpine`), que es el camino que también usa la app.
+Antes el launcher inyectaba un `umalpine-docker.sh` por hostfs, y con un init
+que también arranca el daemon los dos se pisaban (`rm -rf /run/docker` sobre un
+daemon vivo). El init monta cgroup2, bootea openrc, arranca el servicio y
+después corre el comando de `-c` o da la shell; el launcher solo escribe
+`umalpine-hostname` y, si está, `umalpine-net.sh` en el share.
 
 Igual que `umalpine.sh`, acepta `-c 'CMD'` para un comando y sin `-c` deja una
 shell; `UMALPINE_MEM`, `UMALPINE_KERNEL`, `UMALPINE_IMAGE`, `UMALPINE_SHARE` y
@@ -220,7 +224,7 @@ servidor que existe (`nc`) el resultado cambia. Todo lo de abajo se probó con
 | `--network host` | ✅ comparte el netns del guest y llega a `example.com` |
 | `docker compose` | ✅ v2.31.0: bajó `nginx:alpine`, publicó `8081→80`, sirvió el HTML y `down` limpió red y contenedor |
 | kernel de 4 KB bajo el lanzador | ✅ `getconf PAGESIZE=4096`, boot y red |
-| `openrc`/`rc-service docker` | ⚠️ el servicio existe (`/etc/init.d/docker`), pero `rc-service docker start` no arranca `dockerd` en esta minirootfs (`docker is already starting`; openrc no booteó el sistema). `dockerd` a mano —lo que hace el launcher— sí |
+| `openrc`/`rc-service docker` | ✅ `rc-status` reporta `softlevel=boot` y `rc-service docker start/stop/restart` arrancan y frenan el daemon (`RCDOCKER ok server=27.3.1`); el detalle está abajo |
 | host de 16 KB | ⚪ no testeable acá: el teléfono tiene páginas de 4 KB. Lo que sí corre es el guest de 16 KB sobre un host de 4 KB |
 
 No hay kernel de 4 KB **con** `docker.config`: se construye sólo el de 16 KB
@@ -228,34 +232,93 @@ porque un guest de 16 KB bootea en hosts de 4 y de 16 KB, y una segunda copia
 sólo agrega bytes al artifact. El de 4 KB que se probó es el `linux-um` de
 default, es decir el camino sin Docker.
 
-## User namespaces: `CONFIG_USER_NS=y` pero no funcionan
+## User namespaces: no era el kernel, era la imagen
 
-`docker.config` enciende `CONFIG_USER_NS=y` para rootless Docker y
-`--userns-remap`, y el comentario de ahí dice que el guest "es libre de
-tenerlo". Lo tiene en el config, y **no funciona**:
+`docker.config` enciende `CONFIG_USER_NS=y`. En la imagen Alpine el
+`unshare(CLONE_NEWUSER)` daba 0 y el `execve` siguiente fallaba `EACCES` sobre
+un archivo `root:root 0755`, con o sin mapeo (`-U`, `-Ur`, `--map-root-user`), y
+solo con `-U`: `unshare -m/-p/-n` seguidos de exec andaban. Eso se registró como
+bug abierto de `arch/um`. **No lo es.**
 
-    # unshare -U /bin/busybox true
+La causa es la imagen. El minirootfs Alpine se había extraído como usuario sin
+privilegios, así que `/bin`, `/lib`, `/usr`, `/etc` quedaron **del uid del que
+extrajo y en modo 0700**, no `root:root 0755`. En el guest, root los atraviesa
+gracias a `CAP_DAC_OVERRIDE`, y por eso todo funcionaba —menos dentro de un user
+namespace—. Ahí no hay mapeo para ese uid del disco,
+`capable_wrt_inode_uidgid()` falla, `generic_permission()` devuelve `EACCES`
+sobre el directorio, y el `execve` siguiente muere con ese mismo `EACCES`. El
+`execve` funciona sin el `unshare` porque fuera del namespace el root del guest
+sí tiene el override. El archivo que se intentaba ejecutar (`/bin/busybox`) era
+irrelevante: fallaba la travesía de `/bin`.
+
+La prueba es de una línea, hecha en el teléfono. Antes:
+
+    # ls -ld /bin
+    drwx------ 2 10379 10379 /bin
+    # unshare -Ur /bin/busybox echo hi
     unshare: can't execute '/bin/busybox': Permission denied
 
-`strace` lo aísla:
+Después de `chown -R 0:0 /bin /lib /usr /etc` y `chmod 0755` en los directorios:
 
-    unshare(CLONE_NEWUSER)                                = 0
-    execve("/bin/busybox", ["/bin/busybox", "true"], ...) = -1 EACCES (Permission denied)
+    # ls -ld /bin
+    drwxr-xr-x 2 root root /bin
+    # unshare -Ur /bin/busybox echo hi
+    hi
 
-El namespace **se crea** (`unshare` da 0) y el `execve` siguiente falla con
-`EACCES` aunque el archivo es `root:root 0755` y el mismo `execve` funciona sin
-el `unshare`. Pasa con `-U`, `-Ur` y `--map-root-user`, y un `execve` de un path
-inexistente da `ENOENT`, así que el camino de exec se alcanza: el `EACCES` es
-del kernel, no de los bits de permiso.
+Lo que lo hacía confuso es que la imagen que usa el gate `docker-prereqs` es la
+Debian, construida con `debootstrap` como root, así que `unshare -U true` ahí
+siempre anduvo: el control que debía aparecer estaba verde, y solo la Alpine
+reproducía el fallo.
 
-La causa raíz no está encontrada; queda como bug abierto del puerto.
-Consecuencia práctica: rootless Docker y `--userns-remap` **no** son usables
-acá, por más que el símbolo esté en `.config`. Los contenedores comunes
-(namespaces de red/PID/mount, sin userns) sí andan, que es todo lo que el
-launcher y el gate necesitan.
+El arreglo, entonces, no toca `arch/um`:
+
+* `harness/mkrootfs.sh` y `harness/mkdockerimage.sh` hacen `chown -R 0:0` del
+  árbol y `chmod 0755` de los directorios antes de `mke2fs -d`. `mkinitramfs.sh`
+  no lo necesita: su escritor newc pone uid/gid 0 por construcción.
+* `harness/guest/userns-init` es el gate. Primero imprime la propiedad de la que
+  depende el mecanismo, para que una regresión se nombre sola en vez de
+  aparecer como `EACCES`; después hace `unshare -Ur`, ejecuta, chequea el uid
+  adentro y repite con `-U`. En el kernel `default` (sin `CONFIG_USER_NS`) el
+  veredicto es un skip con razón, no un pass.
+
+Con la imagen corregida, rootless Docker y `--userns-remap` dejan de estar
+bloqueados por esto; los contenedores comunes, que nunca lo necesitaron, siguen
+andando igual.
+
+## `rc-service docker`: openrc tiene que bootear el sistema
+
+El síntoma era `rc-service docker start` → `docker is already starting` y un
+`rc-service docker status` que decía que el sistema "no fue booteado por
+openrc". La causa no era `supervise-daemon` ni el pidfile: la imagen traía
+`/etc/runlevels/*` **vacíos** y no tenía `/etc/network/interfaces`.
+
+El servicio declara `depend() { need sysfs cgroups net }`, y `net` lo provee
+`networking`, que a su vez necesita `localmount` → `root`/`fsck`. Con los
+runlevels vacíos nada de esa cadena estaba en un runlevel, así que `openrc
+boot` no arrancaba nada y `rc-service docker start` no podía satisfacer `need
+net` — de ahí el mensaje, que no nombra ni la cadena ni el archivo que faltaba.
+
+`/umarm-init` (el de la imagen Alpine, `harness/guest/umarm-init-alpine`) ahora:
+
+* monta `/run` como tmpfs (el minirootfs lo tiene como directorio real, y por
+  eso los pidfiles sobrevivían al poweroff),
+* monta cgroup v2,
+* baja `printk` a 4 para callar el `KERN_INFO` de bridge/veth,
+* crea `/etc/network/interfaces` con `auto lo` si no existe,
+* hace `rc-update add` de `fsck root sysfs cgroups` en `sysinit`,
+  `hostname localmount networking` en `boot` y `docker` en `default`,
+* corre `openrc sysinit` y `openrc boot`,
+* arranca docker por `rc-service docker start` (con `dockerd` directo como
+  fallback si no hay openrc), y
+* recién entonces da la shell o corre el comando de `-c`.
+
+`harness/guest/rc-docker-init` es el gate: bootea los runlevels, para y arranca
+el servicio, espera el socket, `docker info`, chequea `status: started`, para el
+servicio y chequea `status: stopped`. Corre sobre `alpine-docker.ext4`, la
+imagen que ahora construye `harness/mkdockerimage.sh` y que también es la que
+empaqueta la app.
 
 ## Lo que sigue sin probar
 
 * Un host de 16 KB (no hay uno a mano; el guest de 16 KB sobre 4 KB sí se probó).
 * Más de una CPU: UML es uniprocesador, no hay `cpuset` que probar.
-* La causa raíz del `EACCES` de userns, y arreglarla.

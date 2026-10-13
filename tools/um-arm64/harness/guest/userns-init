@@ -1,0 +1,100 @@
+#!/bin/sh
+# Gate: user namespaces, and the file ownership they depend on.
+#
+# The bug this exists for was reported as a kernel defect and is not one. An
+# Alpine minirootfs extracted by an unprivileged user has /bin and /lib owned
+# by that user and mode 0700 -- tar cannot restore root:root without privilege,
+# and the directory mode is whatever the umask and the build process left. A
+# guest root traverses those directories through CAP_DAC_OVERRIDE, so plain
+# exec works and nothing looks wrong. Inside a user namespace there is no
+# mapping for that on-disk uid, capable_wrt_inode_uidgid() fails, and the very
+# next execve returns EACCES -- on a 0755 file whose execve works without the
+# unshare, which is exactly the observation that made it look like arch/um.
+#
+# So the gate does two things. It asserts the ownership the mechanism depends
+# on, so a regression names itself instead of showing up as EACCES; and it does
+# the thing end to end: unshare(CLONE_NEWUSER), map root, exec, and check the
+# exit status and the uid inside.
+#
+# CONFIG_USER_NS is only in config/docker.config. On the default kernel the
+# subject does not exist, and the honest verdict is a skip with a reason -- not
+# a pass and not a failure. The matrix has a row for each.
+#
+# Run as:  init=/userns-init ubd0=alpine.ext4 root=/dev/ubda rw
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+export PATH
+
+fail() {
+	echo "UMARM_USERNS_FAIL: $*"
+	exit 1
+}
+
+skip() {
+	echo "UMARM_USERNS_SKIP: $*"
+	sync
+	poweroff -f 2>/dev/null || halt -f 2>/dev/null
+	while :; do sleep 3600; done
+}
+
+mkdir -p /proc /sys /dev /tmp 2>/dev/null
+mount -t proc     proc     /proc 2>/dev/null
+mount -t sysfs    sysfs    /sys  2>/dev/null
+mount -t devtmpfs devtmpfs /dev  2>/dev/null
+mount -t tmpfs    tmpfs    /tmp  2>/dev/null
+
+[ -r /proc/self/stat ] || fail "procfs is not mounted"
+
+# --- is the subject even present in this kernel? ----------------------------
+if [ -r /proc/config.gz ]; then
+	zcat /proc/config.gz 2>/dev/null | grep -q '^CONFIG_USER_NS=y' ||
+		skip "CONFIG_USER_NS is not set in this kernel (default config)"
+else
+	skip "no /proc/config.gz (CONFIG_IKCONFIG_PROC), cannot tell whether CONFIG_USER_NS is set"
+fi
+
+command -v unshare >/dev/null 2>&1 || fail "no unshare(1) in this image"
+
+# --- the ownership the exec depends on --------------------------------------
+# Not the test; the reason the test can pass. An Alpine tree that came from an
+# unprivileged extraction has these owned by the build user and mode 0700, and
+# then unshare+exec fails with EACCES no matter what the kernel does.
+bad=0
+for d in / /bin /lib /usr /etc; do
+	set -- $(stat -c '%u %g %a' "$d" 2>/dev/null)
+	uid=${1:-?}; gid=${2:-?}; mode=${3:-?}
+	echo "  $d uid=$uid gid=$gid mode=$mode"
+	[ "$uid" = 0 ] || bad=1
+	# group/other must be able to search the directory, or a process that is
+	# not its owner needs CAP_DAC_OVERRIDE to get through it.
+	case "$mode" in
+	*[1357]) ;;
+	*) bad=1 ;;
+	esac
+done
+[ "$bad" = 0 ] || fail "the image tree is not root-owned 0755 (see the list above); rebuild it, do not blame the kernel"
+
+# --- unshare, map root, and exec --------------------------------------------
+# The exec is the point. unshare(2) returning 0 on its own measures nothing.
+out=$(unshare -Ur /bin/busybox echo UMARM_USERNS_EXEC 2>&1)
+rc=$?
+case "$out" in
+*UMARM_USERNS_EXEC*) ;;
+*) fail "unshare -Ur then exec failed (rc=$rc): $out" ;;
+esac
+
+# And the namespace is real: uid 0 inside it, and a fresh user namespace that
+# is not the one the guest started in.
+u=$(unshare -Ur /bin/busybox id -u 2>&1)
+[ "$u" = 0 ] || fail "uid inside the user namespace is '$u', not 0"
+
+unshare -U /bin/busybox true || fail "unshare -U with no mapping then exec failed"
+
+# -U, -Ur and --map-root-user all failed the same way in the original report,
+# so all three are covered: -U above, -Ur in the two checks before it.
+
+echo "UMARM_USERNS_OK $(uname -m) $(cat /etc/alpine-release 2>/dev/null)"
+echo "UMARM_BOOT_OK"
+
+sync
+exec /umarm-poweroff

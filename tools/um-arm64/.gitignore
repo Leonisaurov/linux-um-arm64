@@ -1,3 +1,19 @@
 # Compiled probes and build output; the sources next to them are what matters.
 probe/*
 !probe/*.c
+
+# The pieces an APK build needs, staged locally from a CI artifact or from a
+# Termux build. They are 2 MB to 150 MB each and every one of them is either
+# produced by the CI android job or already exists elsewhere on the machine;
+# what belongs in the tree is the source that produces them.
+artifacts/
+rootfs/
+dist/umapp/build/
+dist/umapp/umarm.apk
+dist/umapp/umarm.apk.idsig
+# A debug signing key, generated on first use. Never committed.
+dist/umapp/debug.keystore
+dist/umdebian/umnet
+dist/umdebian/passt
+dist/umdebian/appseccomp
+dist/umdebian/umusb

@@ -1,0 +1,113 @@
+#!/bin/sh
+# Gate: `rc-service docker` starts the daemon.
+#
+# The image this runs on is the one mkdockerimage.sh builds: Alpine with docker
+# and openrc, and a root-owned tree. The earlier finding was that the service
+# existed but `rc-service docker start` answered "docker is already starting"
+# and its own status said the system "was not booted by openrc". The image
+# shipped /etc/runlevels/* empty and no /etc/network/interfaces, so the chain
+# docker declares -- `need sysfs cgroups net` -- could never be satisfied.
+#
+# So the gate boots openrc the way umarm-init-alpine does and then drives the
+# service: stop, start, wait for the socket, `docker info`, status, stop again.
+# `docker info` is what makes it more than a string check: it talks to the
+# daemon through /var/run/docker.sock.
+#
+# Run as:  init=/rc-docker-init ubd0=alpine-docker.ext4 root=/dev/ubda rw
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+export PATH
+
+fail() {
+	echo "RCDOCKER_FAIL: $*"
+	[ -f /var/log/docker.log ] && tail -30 /var/log/docker.log
+	[ -f /run/rc-docker.log ] && tail -30 /run/rc-docker.log
+	exit 1
+}
+
+mkdir -p /proc /sys /dev /dev/pts /tmp /run /sys/fs/cgroup 2>/dev/null
+mount -t proc     proc     /proc 2>/dev/null
+mount -t sysfs    sysfs    /sys  2>/dev/null
+mount -t devtmpfs devtmpfs /dev  2>/dev/null
+mount -t devpts   devpts   /dev/pts 2>/dev/null
+mount -t tmpfs    tmpfs    /run  2>/dev/null
+mount -t tmpfs    tmpfs    /tmp  2>/dev/null
+[ -r /proc/self/stat ] || fail "procfs is not mounted"
+
+if [ ! -e /sys/fs/cgroup/cgroup.controllers ]; then
+	mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null
+fi
+[ -e /sys/fs/cgroup/cgroup.controllers ] || fail "cgroup2 is not mounted"
+
+[ -w /proc/sys/kernel/printk ] && echo 4 > /proc/sys/kernel/printk
+
+command -v dockerd >/dev/null 2>&1 || fail "no dockerd in this image"
+command -v rc-service >/dev/null 2>&1 || fail "no rc-service in this image"
+
+# The loopback stanza networking parses; without it, `need net` fails and so
+# does docker. The image mkdockerimage.sh builds has it, but a gate should not
+# depend on the builder having remembered.
+[ -e /etc/network/interfaces ] ||
+	printf 'auto lo\niface lo inet loopback\n' > /etc/network/interfaces
+
+# --- boot the runlevels docker's dependencies live in -----------------------
+rc-update add fsck sysinit >/dev/null 2>&1
+rc-update add root sysinit >/dev/null 2>&1
+rc-update add sysfs sysinit >/dev/null 2>&1
+rc-update add cgroups sysinit >/dev/null 2>&1
+rc-update add hostname boot >/dev/null 2>&1
+rc-update add localmount boot >/dev/null 2>&1
+rc-update add networking boot >/dev/null 2>&1
+rc-update add docker default >/dev/null 2>&1
+
+{
+	echo "=== openrc sysinit ==="
+	openrc sysinit
+	echo "=== openrc boot ==="
+	openrc boot
+} >/run/openrc.log 2>&1
+
+[ "$(cat /run/openrc/softlevel 2>/dev/null)" = boot ] ||
+	fail "openrc did not boot (softlevel is '$(cat /run/openrc/softlevel 2>/dev/null)')"
+
+# --- the service itself -----------------------------------------------------
+rm -rf /var/run/docker /var/run/containerd
+rm -f /var/run/docker.pid /var/run/docker.sock
+mkdir -p /var/log
+
+rc-service docker stop >/dev/null 2>&1
+sleep 1
+
+if ! rc-service docker start >/run/rc-docker.log 2>&1; then
+	fail "rc-service docker start failed"
+fi
+
+i=0
+while [ ! -S /var/run/docker.sock ] && [ "$i" -lt 30 ]; do
+	sleep 1; i=$((i + 1))
+done
+[ -S /var/run/docker.sock ] || fail "dockerd never created /var/run/docker.sock"
+
+docker info >/dev/null 2>&1 || fail "docker info could not talk to the daemon"
+
+case "$(rc-service docker status 2>&1)" in
+*started*) ;;
+*) fail "rc-service docker status does not say started" ;;
+esac
+
+ver=$(docker version --format '{{.Server.Version}}' 2>/dev/null)
+
+# And it can be stopped through the same service, which is the half that says
+# openrc owns the process and not just a forked child nobody is tracking.
+rc-service docker stop >/dev/null 2>&1 || fail "rc-service docker stop failed"
+sleep 2
+case "$(rc-service docker status 2>&1)" in
+*stopped*) ;;
+*) fail "rc-service docker status does not say stopped after stop" ;;
+esac
+
+echo "RCDOCKER ok server=$ver controllers=$(cat /sys/fs/cgroup/cgroup.controllers)"
+echo "UMARM_BOOT_OK"
+
+sync
+exec /umarm-poweroff

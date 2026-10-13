@@ -33,15 +33,16 @@ things Android otherwise denies it:
   minute, and the same binary runs on a Pi, a runner, or the phone. That is what
   makes the gate matrix below affordable rather than aspirational.
 * **The thin edges of the platform.** `dist/umapp` is an Android app that runs
-  the same kernel, and `doc/100-usb.md` hands a real RTL8811AU USB dongle to the
-  guest over USB/IP, which is how the port got `wlan0` and a scan on a phone.
-  CI builds the APK (`umapp`, on an x86_64 runner because the arm64 runner images
-  install no Android SDK) and checks what a device would: the signature, the
-  aarch64 static binaries inside `lib/arm64-v8a/`, the assets, and the manifest.
-  Two differences from the released app are deliberate and named in
-  `tools/um-arm64/CI.md`: the initramfs it ships is the gate-2 fixture rather
-  than an Alpine one (the tree has no producer for that), and `sockprobe_bionic`
-  has no source in the tree.
+  the same kernel on a real terminal -- Termux's own terminal emulator, vendored
+  (Apache 2.0, `dist/umapp/VENDORED-TERMUX.md`) -- and carries the Alpine +
+  Docker + OpenRC image, so the guest is a shell with `docker` in it, not just a
+  boot log. `doc/100-usb.md` hands a real RTL8811AU USB dongle to the guest over
+  USB/IP, which is how the port got `wlan0` and a scan on a phone. CI builds the
+  APK (`umapp`, on an x86_64 runner because the arm64 runner images install no
+  Android SDK) and checks what a device would: the signature, the aarch64 static
+  binaries inside `lib/arm64-v8a/`, the terminal classes in `classes.dex`, the
+  pty shared object, the assets (including the gzipped guest image) and the
+  manifest.
 
 What it is **not**: hardware, a second CPU (the guest is uniprocessor), a 32-bit
 compat layer, or an escape from the host. Every guest syscall is a host syscall

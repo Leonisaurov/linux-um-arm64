@@ -89,10 +89,12 @@ list=$(unzip -l "$APK" 2>/dev/null)
 
 for entry in classes.dex \
              lib/arm64-v8a/libuml.so lib/arm64-v8a/libstub.so \
+             lib/arm64-v8a/libtermux.so \
              lib/arm64-v8a/libumnet.so lib/arm64-v8a/libpasst.so \
              lib/arm64-v8a/libprobe.so lib/arm64-v8a/libappseccomp.so \
              lib/arm64-v8a/libumusb.so \
              assets/initramfs.cpio.gz \
+             assets/rootfs.ext4.gz \
              res/xml/device_filter.xml; do
     if printf '%s\n' "$list" | grep -q " $entry\$"; then
         size=$(printf '%s\n' "$list" | awk -v e="$entry" '$NF == e { print $1 }')
@@ -122,6 +124,42 @@ for lib in libuml.so libstub.so libumnet.so libpasst.so \
         fi
     else
         bad "$lib could not be extracted"
+    fi
+done
+
+# libtermux.so is the one native piece that is *not* a static executable: it is
+# an ordinary shared object loaded into the app process, and it is what turns
+# the guest console into a pty. Checking it as "aarch64 with no PT_INTERP" would
+# pass for the wrong reason, so it gets its own two checks -- the right kind of
+# ELF, and the JNI entry point the terminal calls.
+if unzip -p "$APK" lib/arm64-v8a/libtermux.so > "$tmp/libtermux.so" 2>/dev/null && [ -s "$tmp/libtermux.so" ]; then
+    desc=$(file -b "$tmp/libtermux.so")
+    case "$desc" in
+    *"shared object"*"ARM aarch64"*) ok "libtermux.so is an aarch64 shared object" ;;
+    *) bad "libtermux.so is not an aarch64 shared object: $desc" ;;
+    esac
+    if readelf -sW "$tmp/libtermux.so" > "$tmp/libtermux.syms" 2>/dev/null &&
+       grep -q "Java_com_termux_terminal_JNI_createSubprocess" "$tmp/libtermux.syms"; then
+        ok "libtermux.so exports Java_com_termux_terminal_JNI_createSubprocess"
+    else
+        bad "libtermux.so does not export the pty entry point"
+    fi
+else
+    bad "libtermux.so could not be extracted"
+fi
+
+# The terminal is vendored as Java sources, so an APK that lost the resource
+# merge or the extra R classes still builds and signs perfectly -- and then
+# crashes with NoClassDefFoundError on the phone. Ask the dex directly.
+for cls in com/termux/view/TerminalView \
+           com/termux/terminal/TerminalEmulator \
+           com/termux/terminal/TerminalSession \
+           com/termux/terminal/JNI \
+           org/umarm/debian/MainActivity; do
+    if unzip -p "$APK" classes.dex > "$tmp/dex" 2>/dev/null && grep -aq "L$cls;" "$tmp/dex"; then
+        ok "classes.dex contains $cls"
+    else
+        bad "classes.dex does not contain $cls"
     fi
 done
 

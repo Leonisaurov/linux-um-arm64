@@ -1,0 +1,228 @@
+#!/bin/sh
+# PID 1 for the Alpine + Docker ext4 image: Alpine, on the UML console, booted
+# either by harness/umalpine.sh (as `alpine-um`) or by the Android app.
+#
+# Contract with both launchers:
+#
+#   init=/umarm-init ubd0=alpine.ext4 root=/dev/ubda rw umarm.share=<dir>
+#
+#   * `umarm.share=` names a directory *on the host*. It is a guest-side
+#     convention, not a kernel knob: this script reads it from /proc/cmdline and
+#     mounts it with hostfs. The image must not know where it is running.
+#
+#   * One-shot mode. If <share>/cmd exists, run it, bracket its output with
+#     UMARM_OUTPUT_BEGIN / UMARM_EXIT=<status> and power off. The launcher prints
+#     only what is between the markers and propagates the status, so a command
+#     that printed nothing and a boot that failed cannot look alike. The
+#     launcher's interactive mode uses the same file, ending it with an
+#     `exec /bin/sh -l`; when that shell exits, this script powers the guest off.
+#
+#   * Interactive mode. No <share>/cmd, so give a login shell on the console.
+#
+#   * <share>/umalpine-hostname, if the launcher wrote one, names the machine.
+#
+# The Docker image is the same image as the plain one, with dockerd installed;
+# this script starts it whether or not the service system works. See
+# doc/80-docker-alpine.md.
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+export PATH
+
+log() { echo "umarm-init: $*"; }
+
+# Mount unless it is already mounted. The kernel mounts devtmpfs itself
+# (CONFIG_DEVTMPFS_MOUNT=y), and a second mount over it hides the first rather
+# than failing -- which is the kind of thing that looks fine until something
+# looks for a device node in the wrong place.
+mount_once() {
+	grep -q " $2 " /proc/mounts 2>/dev/null && return 0
+	mount -t "$1" "$3" "$2" 2>/dev/null
+}
+
+mkdir -p /proc /sys /dev /dev/pts /tmp /host /run /sys/fs/cgroup 2>/dev/null
+mount_once proc     /proc    proc
+mount_once sysfs    /sys     sysfs
+mount_once devtmpfs /dev     devtmpfs
+mount_once devpts   /dev/pts devpts
+# /run is a real directory in the minirootfs, not a tmpfs, so state a killed
+# dockerd leaves behind survives a poweroff. A tmpfs makes that impossible and
+# is what openrc expects anyway.
+mount_once tmpfs    /run     run
+mount_once tmpfs    /tmp     tmpfs
+
+[ -r /proc/self/stat ] || log "WARNING: procfs did not mount"
+
+# cgroup v2, which is the only hierarchy docker uses on this kernel and which
+# nothing in the minirootfs mounts for itself.
+if [ ! -e /sys/fs/cgroup/cgroup.controllers ]; then
+	mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null
+fi
+
+# The bridge and veth drivers log every port state change at KERN_INFO, and the
+# guest console prints whatever is at or above console_loglevel. At the default
+# (7) a one-line `docker run` is buried under a dozen "docker0: port 1(veth...)
+# entered blocking state" lines. Raising the threshold to 4 keeps warnings,
+# errors and BUGs -- which is what the port's own gates scan for -- and drops
+# the INFO chatter.
+[ -w /proc/sys/kernel/printk ] && echo 4 > /proc/sys/kernel/printk
+
+# --- the host share ---------------------------------------------------------
+share=$(tr ' ' '\n' < /proc/cmdline 2>/dev/null |
+	sed -n 's/^umarm\.share=//p' | tail -1)
+
+if [ -n "$share" ]; then
+	# hostfs concatenates the mount option onto its own root, so the path goes
+	# in the mount and not in the image. (Without a `hostfs=` kernel argument
+	# there is no confinement: this mount exposes exactly the directory named
+	# here, and a mount with no option at all would expose the whole host.)
+	if mount -t hostfs none /host -o "$share" 2>/dev/null; then
+		log "/host is $share"
+	else
+		log "WARNING: cannot mount hostfs on $share"
+	fi
+else
+	log "no umarm.share= on the command line, so there is no /host"
+fi
+
+# --- name the machine -------------------------------------------------------
+# The kernel's hostname is CONFIG_DEFAULT_HOSTNAME, which is the literal
+# "(none)", until someone calls sethostname(2); the minirootfs has no init that
+# does. The name travels through the share as a file rather than interpolated
+# into this script, so quoting the operator's value is not the script's problem.
+if [ -r /host/umalpine-hostname ]; then
+	read -r _hn < /host/umalpine-hostname
+	[ -n "$_hn" ] && echo "$_hn" > /proc/sys/kernel/hostname 2>/dev/null
+fi
+
+# --- network ----------------------------------------------------------------
+# The UML vector NIC is vec0. If the launcher provided a bring-up script it is
+# preferred, so the DHCP logic can change without rebuilding the image; the
+# built-in fallback is what the app uses, which has no launcher to inject one.
+if [ -r /host/umalpine-net.sh ]; then
+	. /host/umalpine-net.sh
+else
+	IF=vec0
+	[ -d "/sys/class/net/$IF" ] || IF=$(ls /sys/class/net 2>/dev/null | grep -v '^lo$' | head -1)
+	if [ -n "$IF" ]; then
+		ip link set lo up 2>/dev/null
+		ip link set "$IF" up 2>/dev/null
+		i=0
+		while [ "$i" -lt 3 ]; do
+			udhcpc -i "$IF" -q -n -t 5 -T 3 >/dev/null 2>&1 && break
+			i=$((i + 1)); sleep 1
+		done
+		[ -s /etc/resolv.conf ] || echo "nameserver 1.1.1.1" > /etc/resolv.conf
+	else
+		log "no network interface"
+	fi
+fi
+
+# --- openrc ---------------------------------------------------------------
+# Boot the runlevels before the services. This is what makes `rc-service docker`
+# work: openrc refuses to manage a service normally when it did not boot the
+# system itself ("the system was not booted by openrc"), and the stock
+# minirootfs ships /etc/runlevels/* empty, so nothing was ever in them. The set
+# below is the minimum docker's own service needs: it declares
+# `need sysfs cgroups net`, and net comes from networking, which needs
+# localmount, which needs root and fsck -- all of which are no-ops here (no
+# /etc/fstab, / is already rw) but have to be *tracked* as started for openrc's
+# dependency check to pass.
+#
+# The output goes to a log rather than the console: openrc is chatty and the
+# console is the user's shell.
+if command -v openrc >/dev/null 2>&1 && command -v rc-update >/dev/null 2>&1; then
+	# /etc/hostname is what openrc's hostname service reads; the share's value
+	# (below) wins on the console, but the two should not disagree.
+	[ -r /host/umalpine-hostname ] && read -r _hn2 < /host/umalpine-hostname &&
+		[ -n "$_hn2" ] && echo "$_hn2" > /etc/hostname 2>/dev/null
+
+	# /etc/network/interfaces is what Alpine's networking service reads, and it
+	# is the `net` virtual that docker's service declares `need`. The minirootfs
+	# ships no such file, so networking fails with
+	#   ifquery: could not parse /etc/network/interfaces
+	# and openrc then refuses to start docker ('cannot start docker as
+	# networking would not start'). One loopback stanza is enough: the DHCP on
+	# vec0 is done above, directly, and networking only has to come up and
+	# provide net.
+	[ -e /etc/network/interfaces ] ||
+		printf 'auto lo\niface lo inet loopback\n' > /etc/network/interfaces
+
+	rc-update add fsck sysinit >/dev/null 2>&1
+	rc-update add root sysinit >/dev/null 2>&1
+	rc-update add sysfs sysinit >/dev/null 2>&1
+	rc-update add cgroups sysinit >/dev/null 2>&1
+	rc-update add hostname boot >/dev/null 2>&1
+	rc-update add localmount boot >/dev/null 2>&1
+	rc-update add networking boot >/dev/null 2>&1
+	rc-update add docker default >/dev/null 2>&1
+
+	{
+		echo "=== openrc sysinit ==="
+		openrc sysinit
+		echo "=== openrc boot ==="
+		openrc boot
+	} >/run/openrc-boot.log 2>&1
+	log "openrc booted (rc-status: $(rc-status --crashed 2>/dev/null | wc -l) crashed)"
+fi
+
+# --- docker ---------------------------------------------------------------
+# The service is started through openrc when that works, so `rc-service docker
+# status/stop/restart` are meaningful afterwards; dockerd directly is the
+# fallback for an image without openrc (a plain Alpine rootfs).
+if command -v dockerd >/dev/null 2>&1; then
+	# /run is a tmpfs now, so this is only for the case where something in the
+	# image mounted over it; a stale pidfile is what stops the second boot,
+	# because the PID in it has been reused.
+	rm -rf /var/run/docker /var/run/containerd
+	rm -f /var/run/docker.pid /var/run/docker.sock
+	mkdir -p /var/log
+
+	if command -v rc-service >/dev/null 2>&1 && [ -s /run/openrc/softlevel ] &&
+	   rc-service docker start >>/run/openrc-boot.log 2>&1; then
+		log "docker started through openrc"
+	else
+		dockerd > /var/log/dockerd.log 2>&1 &
+		log "docker started directly (openrc unavailable)"
+	fi
+
+	i=0
+	while [ ! -S /var/run/docker.sock ] && [ "$i" -lt 30 ]; do
+		sleep 1; i=$((i + 1))
+	done
+	if [ -S /var/run/docker.sock ] && docker info >/dev/null 2>&1; then
+		log "dockerd up ($(docker version --format '{{.Server.Version}}' 2>/dev/null))"
+	else
+		log "dockerd did not come up; tail of /var/log/dockerd.log:"
+		tail -30 /var/log/dockerd.log 2>/dev/null
+	fi
+fi
+
+# --- one command, or a shell ------------------------------------------------
+if [ -s /host/cmd ]; then
+	cmd=$(cat /host/cmd)
+
+	# Removed before it runs, so a guest that reboots for any reason cannot
+	# execute the same command twice, and so a stale file from an earlier run
+	# cannot be mistaken for a fresh request.
+	rm -f /host/cmd
+
+	echo "UMARM_OUTPUT_BEGIN"
+	/bin/sh -c "$cmd" 2>&1
+	rc=$?
+	echo "UMARM_EXIT=$rc"
+
+	sync
+	exec /umarm-poweroff
+fi
+
+# --- interactive ------------------------------------------------------------
+echo "umarm: Alpine $(cat /etc/alpine-release 2>/dev/null) $(uname -m) on $(uname -sr)"
+echo "umarm: files in /host are shared with the device; 'exit' powers off"
+if command -v setsid >/dev/null 2>&1 && setsid -w -c /bin/sh -l 2>/dev/null; then
+	:
+else
+	/bin/sh -l
+fi
+
+sync
+exec /umarm-poweroff

@@ -215,6 +215,22 @@ jobs:
           export ART="$RUNNER_TEMP/artifacts"
           bash tools/um-arm64/harness/mkrootfs.sh "$ART/alpine.ext4"
 
+      # The image the app ships and the rc-docker gate boots: Alpine with
+      # docker, openrc and the compose plugin, a root-owned tree, and
+      # /umarm-init. Shrunk to its content and gzipped here because the boot
+      # gate wants the raw filesystem and the APK wants the archive, and one
+      # build of a 1 GiB image is enough.
+      - name: Build the Alpine + Docker + OpenRC image
+        run: |
+          set -euo pipefail
+          export ART="$RUNNER_TEMP/artifacts"
+          bash tools/um-arm64/harness/mkdockerimage.sh "$ART/alpine-docker.ext4"
+          # Gzipped for the APK, not shrunk to the minimum: the image is a
+          # working guest, and a filesystem with no free blocks cannot pull an
+          # image. The zero blocks cost almost nothing in the archive.
+          gzip -6 -c "$ART/alpine-docker.ext4" > "$ART/alpine-docker.ext4.gz"
+          ls -la "$ART"/alpine-docker.ext4*
+
       - name: Build initramfs gate fixture
         run: |
           set -euo pipefail
@@ -466,6 +482,25 @@ jobs:
           # directories.
           ls -la "$ART"
 
+      # The pty half of the terminal. Unlike everything else in lib/arm64-v8a
+      # this is an ordinary shared object, loaded into the app process by
+      # System.loadLibrary("termux"), so it is built here and not as a static
+      # executable: Termux's jni/termux.c, unchanged, against the NDK's jni.h.
+      - name: Build the pty helper (libtermux.so)
+        run: |
+          set -euo pipefail
+          ND="$NDK_HOME/android-ndk-r27c"
+          CC="$ND/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android${ANDROID_API}-clang"
+          [ -x "$CC" ] || { echo "no NDK clang at $CC" >&2; exit 2; }
+          "$CC" -shared -fPIC -O2 -Wall \
+            -o "$RUNNER_TEMP/android/libtermux.so" \
+            tools/um-arm64/dist/umapp/jni/termux.c
+          file "$RUNNER_TEMP/android/libtermux.so"
+          # Not a pipeline: under pipefail, grep -q closing the pipe makes
+          # readelf die of SIGPIPE and the step fail on a present symbol.
+          readelf -sW "$RUNNER_TEMP/android/libtermux.so" > "$RUNNER_TEMP/libtermux.syms"
+          grep -q Java_com_termux_terminal_JNI_createSubprocess "$RUNNER_TEMP/libtermux.syms"
+
       - name: Assemble the artifact
         run: |
           set -euo pipefail
@@ -478,6 +513,7 @@ jobs:
             install -m 0755 "$A/appseccomp_bionic" "$A/$p/appseccomp"
             install -m 0755 "$A/umusb_bionic"     "$A/$p/umusb"
             install -m 0755 "$A/sockprobe_bionic" "$A/$p/sockprobe"
+            install -m 0755 "$A/libtermux.so"    "$A/$p/libtermux.so"
           done
           # The intermediate names were for the build, not for the artifact.
           rm -f "$A/umnet_bionic" "$A/passt_bionic"
@@ -629,6 +665,11 @@ jobs:
           install -m 0755 "$RUNNER_TEMP/artifacts/um-arm64-android/16k/appseccomp" "$ROOT/dist/umdebian/appseccomp"
           install -m 0755 "$RUNNER_TEMP/artifacts/um-arm64-android/16k/umusb"      "$ROOT/dist/umdebian/umusb"
           install -m 0755 "$RUNNER_TEMP/artifacts/um-arm64-android/16k/sockprobe"  "$ROOT/artifacts/sockprobe_bionic"
+          install -m 0755 "$RUNNER_TEMP/artifacts/um-arm64-android/16k/libtermux.so" "$ROOT/artifacts/libtermux_bionic"
+          # The guest image the APK carries: the same Alpine + Docker + OpenRC
+          # ext4 the rc-docker gate boots, gzipped. Without it the app boots
+          # only the small Alpine initramfs, which is a shell and nothing else.
+          export ROOTFS_GZ="$RUNNER_TEMP/artifacts/um-arm64-kernels/alpine-docker.ext4.gz"
           # The Alpine initramfs, which is the guest the app boots when it has
           # no disk image: a real busybox and a real shell. It used to be the
           # gate-2 fixture because the tree had no producer for an Alpine one.
@@ -837,6 +878,16 @@ jobs:
           # is the list that config exists for, which is where the port's own
           # "docker starts and runs" claim turned out to be false.
           - { name: docker-prereqs, kernel: docker, ubd0: debian.ext4, init: /docker-init,        marker: UMARM_BOOT_OK,   timeout: "900", extra: "rw", debian: "yes" }
+          # --- user namespaces, and the file ownership that makes them usable.
+          # CONFIG_USER_NS is only in the docker config, so the default-config
+          # row asserts the skip-with-reason verdict rather than a pass.
+          - { name: userns,        kernel: docker,  ubd0: alpine.ext4, init: /userns-init, marker: UMARM_USERNS_OK,   timeout: "300", extra: "rw" }
+          - { name: userns-skip,   kernel: default, ubd0: alpine.ext4, init: /userns-init, marker: UMARM_USERNS_SKIP, timeout: "300", extra: "rw" }
+          # --- rc-service docker. The image is the one the app ships -- Alpine
+          # with the daemon and openrc -- which is what lets this matrix run a
+          # real dockerd; the docker-prereqs gate above checks only the kernel
+          # features because no image with the daemon fit there.
+          - { name: rc-docker,     kernel: docker,  ubd0: alpine-docker.ext4, init: /rc-docker-init, marker: UMARM_BOOT_OK, timeout: "900", extra: "rw" }
           # --- the rss counters, at both page sizes, plus the negative control
           # that gives the clean runs their meaning.
           #

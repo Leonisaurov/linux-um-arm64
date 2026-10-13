@@ -1,16 +1,22 @@
 package org.umarm.debian;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.SharedPreferences;
 import android.graphics.Color;
-import android.graphics.Typeface;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbDeviceConnection;
 import android.hardware.usb.UsbManager;
+import android.net.LocalServerSocket;
+import android.net.LocalSocket;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -19,11 +25,14 @@ import android.os.ParcelFileDescriptor;
 import android.system.Os;
 import android.system.OsConstants;
 import android.text.InputType;
+import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.View;
-import android.view.ViewGroup.LayoutParams;
-import android.view.inputmethod.EditorInfo;
+import android.view.ViewGroup;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
@@ -31,16 +40,21 @@ import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
-import android.net.LocalServerSocket;
-import android.net.LocalSocket;
-import java.io.FileDescriptor;
-import java.io.BufferedReader;
+import com.termux.terminal.TerminalSession;
+import com.termux.terminal.TerminalSessionClient;
+import com.termux.view.TerminalView;
+import com.termux.view.TerminalViewClient;
+
 import java.io.File;
+import java.io.FileDescriptor;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.BufferedReader;
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -51,159 +65,196 @@ import java.util.concurrent.TimeUnit;
 import java.util.zip.GZIPInputStream;
 
 /**
- * A Linux kernel, running inside an ordinary Android app.
+ * A Linux kernel, running inside an ordinary Android app, on a real terminal.
  *
- * This exists to move the port out of the adb shell and into the app sandbox,
- * which is a materially harder environment and the one that actually matters
- * for shipping. The differences that shape this class:
+ * The console used to be a TextView and a single-line input box, which could
+ * show a boot log and nothing else -- no ANSI, no cursor addressing, no line
+ * editing, so no interactive program could run. The terminal is now the one
+ * from Termux (vendored under com/termux/terminal and com/termux/view), which
+ * means the guest console is a genuine vt: the kernel talks to a pseudoterminal
+ * (com/termux/terminal/JNI, a copy of Termux's jni/termux.c), the emulator
+ * interprets the escapes, and the guest's shell, vi and top behave the way they
+ * do in Termux itself.
  *
- *   - An app runs in the untrusted_app SELinux domain under a W^X policy. It
+ * The differences that shape the rest of the class remain the app sandbox's:
+ *
+ *   - The app runs in the untrusted_app SELinux domain under a W^X policy. It
  *     may not execute anything it wrote itself, so every binary -- the kernel,
- *     the stub, passt, umnet, umusb -- ships as a lib*.so inside the APK and
- *     is run from getApplicationInfo().nativeLibraryDir, the one directory an
- *     app is allowed to execute from.
- *   - UML normally execs its stub from an anonymous memfd. That is refused
- *     here, so the kernel is passed stub_exe=<nativeLibraryDir>/libstub.so.
+ *     the stub, passt, umnet, umusb -- ships as a lib*.so inside the APK and is
+ *     run from getApplicationInfo().nativeLibraryDir, the one directory an app
+ *     may execute from. libtermux.so is the exception that proves the rule: it
+ *     is an ordinary shared library, loaded into this process rather than exec'd.
+ *   - UML normally execs its stub from an anonymous memfd. That is refused here,
+ *     so the kernel is passed stub_exe=<nativeLibraryDir>/libstub.so.
  *   - There is no /tmp. Guest RAM is backed from the app's cache directory.
- *
- * The UI is deliberately plain: a scrolling log, a line-input box wired to the
- * guest's stdin, and the few settings worth changing while debugging. It is a
- * console, not a terminal emulator -- there is no ANSI or cursor handling,
- * because the point is to see what the kernel says, not to run vim.
+ *   - The pty is how the guest gets a tty: createSubprocess() opens /dev/ptmx,
+ *     forks and execs the kernel (or the umnet wrapper in front of it) with the
+ *     pty slave as fd 0/1/2, so con0=fd:0,fd:1 is a terminal and SIGWINCH and
+ *     TIOCSWINSZ do what they should.
  */
-public class MainActivity extends Activity {
+public class MainActivity extends Activity implements TerminalViewClient, TerminalSessionClient {
 
-    private TextView log;
-    private ScrollView scroll;
-    private EditText input;
+    private static final String TAG = "umarm";
+
+    private TerminalView terminalView;
+    private Button startStop;
+    private Button ctrlKey;
+    private Button altKey;
+    private HorizontalScrollView keysScroll;
+
+    /* Extra-key state, read by the view for the soft keyboard. */
+    private boolean mCtrl, mAlt, mShift, mFn;
+
+    private int fontSizeSp = 12;
+
+    /* Settings, persisted so a reboot of the guest does not lose them. */
     private EditText memField;
     private CheckBox seccompBox;
     private CheckBox netBox;
     private CheckBox usbBox;
-    private Button startStop;
+    private SharedPreferences prefs;
 
-    private Process guest;
-    private OutputStream guestIn;
+    private TerminalSession session;
+    private int shellPid = -1;
+
     private final Handler ui = new Handler(Looper.getMainLooper());
 
-    private static final int MAX_CHARS = 200000;
+    /*
+     * Deliberately one level of anonymous class, not two: a Runnable posting
+     * another Runnable produces a MainActivity$N$1 class file that d8 8.2
+     * rejects with an internal NullPointerException, which reads like a
+     * compiler bug rather than anything to do with this code.
+     */
+    private FileOutputStream logFile;
 
     @Override
     protected void onCreate(Bundle saved) {
         super.onCreate(saved);
+        prefs = getPreferences(MODE_PRIVATE);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(12, 12, 12, 12);
+        root.setBackgroundColor(Color.BLACK);
 
-        /* --- settings row --- */
-        LinearLayout settings = new LinearLayout(this);
-        settings.setOrientation(LinearLayout.HORIZONTAL);
-        settings.setGravity(Gravity.CENTER_VERTICAL);
+        /* --- top bar: boot/stop, extra keys, settings --- */
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
 
-        TextView memLabel = new TextView(this);
-        memLabel.setText("RAM MB ");
-        settings.addView(memLabel);
-
-        memField = new EditText(this);
-        memField.setInputType(InputType.TYPE_CLASS_NUMBER);
-        memField.setText("512");
-        memField.setWidth(200);
-        settings.addView(memField);
-
-        seccompBox = new CheckBox(this);
-        seccompBox.setText("seccomp");
-        seccompBox.setChecked(true);
-        settings.addView(seccompBox);
-
-        netBox = new CheckBox(this);
-        netBox.setText("net");
-        netBox.setChecked(true);
-        settings.addView(netBox);
-
-        /*
-         * Off by default: most runs have nothing plugged into the phone, and
-         * the USB path costs a permission dialog before the guest starts.
-         */
-        usbBox = new CheckBox(this);
-        usbBox.setText("usb");
-        usbBox.setChecked(false);
-        settings.addView(usbBox);
-
-        /* Scrolls sideways, because a LinearLayout does not shrink: with this
-         * many controls a narrow screen would put the last checkbox past the
-         * right edge, where it cannot be tapped at all. */
-        HorizontalScrollView settingsScroll = new HorizontalScrollView(this);
-        settingsScroll.addView(settings);
-        root.addView(settingsScroll, new LinearLayout.LayoutParams(
-                LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
-
-        /* --- start/stop --- */
         startStop = new Button(this);
         startStop.setText("Boot");
         startStop.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
-                if (guest == null) boot(); else stop();
+                if (isGuestRunning()) stopGuest(); else boot();
             }
         });
-        LinearLayout buttons = new LinearLayout(this);
-        buttons.setOrientation(LinearLayout.HORIZONTAL);
-        buttons.addView(startStop, new LinearLayout.LayoutParams(0,
-                LayoutParams.WRAP_CONTENT, 1.0f));
+        bar.addView(startStop, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f));
 
-        /*
-         * The seccomp filter zygote installs on this app is inherited by every
-         * process it spawns, including the kernel -- which is why the guest
-         * dies with SIGSYS here but not under `run-as`. This button runs a
-         * probe under that same filter and prints which syscalls it forbids,
-         * because "something was denied" is not something you can act on.
-         */
-        Button probe = new Button(this);
-        probe.setText("Probe");
-        probe.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) { runProbe(); }
-        });
-        buttons.addView(probe, new LinearLayout.LayoutParams(0,
-                LayoutParams.WRAP_CONTENT, 1.0f));
-
-        root.addView(buttons, new LinearLayout.LayoutParams(
-                LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
-
-        /* --- console --- */
-        log = new TextView(this);
-        log.setTypeface(Typeface.MONOSPACE);
-        log.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
-        log.setTextIsSelectable(true);
-        log.setBackgroundColor(Color.BLACK);
-        log.setTextColor(Color.GREEN);
-
-        scroll = new ScrollView(this);
-        scroll.addView(log);
-        root.addView(scroll, new LinearLayout.LayoutParams(
-                LayoutParams.MATCH_PARENT, 0, 1.0f));
-
-        /* --- input line, wired to the guest's stdin --- */
-        input = new EditText(this);
-        input.setHint("type a command, Enter to send");
-        input.setSingleLine(true);
-        input.setImeOptions(EditorInfo.IME_ACTION_SEND);
-        input.setOnEditorActionListener(new TextView.OnEditorActionListener() {
-            @Override public boolean onEditorAction(TextView v, int id, android.view.KeyEvent e) {
-                send(input.getText().toString());
-                input.setText("");
-                return true;
+        Button keysButton = new Button(this);
+        keysButton.setText("Keys");
+        keysButton.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                keysScroll.setVisibility(keysScroll.getVisibility() == View.VISIBLE
+                        ? View.GONE : View.VISIBLE);
             }
         });
-        root.addView(input, new LinearLayout.LayoutParams(
-                LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
+        bar.addView(keysButton, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f));
+
+        Button settingsButton = new Button(this);
+        settingsButton.setText("Settings");
+        settingsButton.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { showSettings(); }
+        });
+        bar.addView(settingsButton, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f));
+
+        root.addView(bar, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        /* --- the terminal --- */
+        terminalView = new TerminalView(this, null);
+        terminalView.setTerminalViewClient(this);
+        terminalView.setFocusable(true);
+        terminalView.setFocusableInTouchMode(true);
+        terminalView.setTextSize(fontSizeSp);
+        root.addView(terminalView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1.0f));
+
+        /* --- extra keys --- */
+        keysScroll = new HorizontalScrollView(this);
+        LinearLayout keysRow = new LinearLayout(this);
+        keysRow.setOrientation(LinearLayout.HORIZONTAL);
+
+        ctrlKey = addKey(keysRow, "CTRL", new Runnable() {
+            @Override public void run() { mCtrl = !mCtrl; paintModifiers(); }
+        });
+        altKey = addKey(keysRow, "ALT", new Runnable() {
+            @Override public void run() { mAlt = !mAlt; paintModifiers(); }
+        });
+        addKey(keysRow, "SHIFT", new Runnable() {
+            @Override public void run() { mShift = !mShift; paintModifiers(); }
+        });
+        addKey(keysRow, "FN", new Runnable() {
+            @Override public void run() { mFn = !mFn; paintModifiers(); }
+        });
+        addKey(keysRow, "ESC", new Runnable() {
+            @Override public void run() { writeToSession("\u001b"); }
+        });
+        addKey(keysRow, "TAB", new Runnable() {
+            @Override public void run() { writeToSession("\t"); }
+        });
+        addKey(keysRow, "^C", new Runnable() {
+            @Override public void run() { writeToSession("\u0003"); }
+        });
+        addKey(keysRow, "^D", new Runnable() {
+            @Override public void run() { writeToSession("\u0004"); }
+        });
+        addKey(keysRow, "\u2191", new Runnable() {
+            @Override public void run() { writeToSession("\u001b[A"); }
+        });
+        addKey(keysRow, "\u2193", new Runnable() {
+            @Override public void run() { writeToSession("\u001b[B"); }
+        });
+        addKey(keysRow, "\u2192", new Runnable() {
+            @Override public void run() { writeToSession("\u001b[C"); }
+        });
+        addKey(keysRow, "\u2190", new Runnable() {
+            @Override public void run() { writeToSession("\u001b[D"); }
+        });
+        addKey(keysRow, "/", new Runnable() {
+            @Override public void run() { writeToSession("/"); }
+        });
+        addKey(keysRow, "-", new Runnable() {
+            @Override public void run() { writeToSession("-"); }
+        });
+        addKey(keysRow, "|", new Runnable() {
+            @Override public void run() { writeToSession("|"); }
+        });
+        addKey(keysRow, "~", new Runnable() {
+            @Override public void run() { writeToSession("~"); }
+        });
+        addKey(keysRow, "PASTE", new Runnable() {
+            @Override public void run() { paste(); }
+        });
+
+        keysScroll.addView(keysRow);
+        root.addView(keysScroll, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         setContentView(root);
 
-        append("umarm -- Linux/UML on aarch64, inside an Android app\n");
-        append("uid " + android.os.Process.myUid() + "\n");
-        append("libdir " + getApplicationInfo().nativeLibraryDir + "\n\n");
+        loadSettings();
+        paintModifiers();
+
+        log("umarm -- Linux/UML on aarch64, Termux terminal, inside an Android app\n");
+        log("uid " + android.os.Process.myUid() + " libdir "
+                + getApplicationInfo().nativeLibraryDir + "\n");
 
         usbAttachNotice(getIntent());
+
+        showKeyboardSoon();
     }
 
     /*
@@ -218,48 +269,427 @@ public class MainActivity extends Activity {
         usbAttachNotice(i);
     }
 
-    /*
-     * Deliberately one level of anonymous class, not two: a Runnable posting
-     * another Runnable produces a MainActivity$N$1 class file that d8 8.2
-     * rejects with an internal NullPointerException, which reads like a
-     * compiler bug rather than anything to do with this code.
-     */
-    private java.io.FileOutputStream logFile;
-    private LocalServerSocket usbServer;
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (terminalView != null && terminalView.mEmulator != null)
+            terminalView.onScreenUpdated();
+    }
 
-    private final class Appender implements Runnable {
-        private final String s;
+    @Override
+    protected void onDestroy() {
+        if (isFinishing()) stopGuest();
+        super.onDestroy();
+    }
 
-        Appender(String s) { this.s = s; }
+    private Button addKey(LinearLayout row, String label, final Runnable action) {
+        Button b = new Button(this);
+        b.setText(label);
+        b.setAllCaps(false);
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        b.setMinWidth(0);
+        b.setMinimumWidth(0);
+        b.setPadding(24, 8, 24, 8);
+        b.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { action.run(); }
+        });
+        row.addView(b);
+        return b;
+    }
 
-        @Override public void run() {
-            log.append(s);
-            /* Keep the buffer bounded: a kernel log will happily grow until
-             * the TextView becomes unusable. */
-            if (log.length() > MAX_CHARS) {
-                CharSequence c = log.getText();
-                log.setText(c.subSequence(c.length() - MAX_CHARS / 2, c.length()));
+    private void paintModifiers() {
+        ctrlKey.setBackgroundColor(mCtrl ? Color.rgb(0, 96, 0) : Color.TRANSPARENT);
+        altKey.setBackgroundColor(mAlt ? Color.rgb(0, 96, 0) : Color.TRANSPARENT);
+        /* SHIFT and FN have no dedicated button handle; their state is read by
+         * the view through readShiftKey()/readFnKey(). */
+    }
+
+    private void writeToSession(String s) {
+        if (session == null || !session.isRunning()) {
+            toast("guest is not running");
+            return;
+        }
+        session.write(s);
+        terminalView.onScreenUpdated();
+    }
+
+    private void paste() {
+        ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        if (cm == null || !cm.hasPrimaryClip()) {
+            toast("clipboard is empty");
+            return;
+        }
+        CharSequence t = cm.getPrimaryClip().getItemAt(0).getText();
+        if (t != null) writeToSession(t.toString());
+    }
+
+    private void toast(String s) {
+        Toast.makeText(this, s, Toast.LENGTH_SHORT).show();
+    }
+
+    private void showKeyboardSoon() {
+        ui.postDelayed(new Runnable() {
+            @Override public void run() { showKeyboard(); }
+        }, 300);
+    }
+
+    private void showKeyboard() {
+        InputMethodManager imm =
+                (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+        if (imm != null)
+            imm.showSoftInput(terminalView, InputMethodManager.SHOW_IMPLICIT);
+    }
+
+    /* ------------------------------------------------------------------
+     * Settings
+     * ------------------------------------------------------------------ */
+
+    private void loadSettings() {
+        memField = new EditText(this);
+        memField.setInputType(InputType.TYPE_CLASS_NUMBER);
+        memField.setText(prefs.getString("mem", "512"));
+
+        seccompBox = new CheckBox(this);
+        seccompBox.setText("seccomp");
+        seccompBox.setChecked(prefs.getBoolean("seccomp", true));
+
+        netBox = new CheckBox(this);
+        netBox.setText("net (umnet + passt)");
+        netBox.setChecked(prefs.getBoolean("net", true));
+
+        /*
+         * Off by default: most runs have nothing plugged into the phone, and the
+         * USB path costs a permission dialog before the guest starts.
+         */
+        usbBox = new CheckBox(this);
+        usbBox.setText("usb (RTL8811AU passthrough, needs net)");
+        usbBox.setChecked(prefs.getBoolean("usb", false));
+    }
+
+    private void showSettings() {
+        LinearLayout v = new LinearLayout(this);
+        v.setOrientation(LinearLayout.VERTICAL);
+        v.setPadding(32, 16, 32, 16);
+
+        LinearLayout memRow = new LinearLayout(this);
+        memRow.setOrientation(LinearLayout.HORIZONTAL);
+        memRow.setGravity(Gravity.CENTER_VERTICAL);
+        TextView l = new TextView(this);
+        l.setText("Guest RAM (MB)   ");
+        memRow.addView(l);
+        memRow.addView(memField);
+        v.addView(memRow);
+
+        v.addView(seccompBox);
+        v.addView(netBox);
+        v.addView(usbBox);
+
+        Button probe = new Button(this);
+        probe.setText("Probe app seccomp filter");
+        probe.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View w) { runProbe(); }
+        });
+        v.addView(probe);
+
+        new AlertDialog.Builder(this)
+                .setTitle("umarm")
+                .setView(v)
+                .setPositiveButton("Save", new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface d, int which) {
+                        prefs.edit()
+                                .putString("mem", memField.getText().toString())
+                                .putBoolean("seccomp", seccompBox.isChecked())
+                                .putBoolean("net", netBox.isChecked())
+                                .putBoolean("usb", usbBox.isChecked())
+                                .apply();
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    /* ------------------------------------------------------------------
+     * Booting the guest
+     * ------------------------------------------------------------------ */
+
+    private boolean isGuestRunning() {
+        return session != null && session.isRunning();
+    }
+
+    private void boot() {
+        startStop.setText("Stop");
+        log("\n[boot]\n");
+
+        String libdir = getApplicationInfo().nativeLibraryDir;
+        File kernel = new File(libdir, "libuml.so");
+        File stub = new File(libdir, "libstub.so");
+        File umnet = new File(libdir, "libumnet.so");
+        File passt = new File(libdir, "libpasst.so");
+        File umusb = new File(libdir, "libumusb.so");
+
+        if (!kernel.exists()) {
+            fail("ERROR: " + kernel + " missing from the APK");
+            return;
+        }
+        if (!stub.exists()) {
+            fail("ERROR: " + stub + " missing from the APK");
+            return;
+        }
+
+        File initrd = null;
+        File rootfs = null;
+        try {
+            rootfs = unpackAsset("rootfs.ext4.gz", "rootfs.ext4");
+        } catch (IOException e) {
+            /* Optional: the image is what carries docker and persistence; the
+             * initramfs is the fallback that always ships. */
+        }
+        if (rootfs == null) {
+            try {
+                initrd = unpackAsset("initramfs.cpio.gz", "initramfs.cpio.gz");
+            } catch (IOException e) {
+                fail("ERROR: neither rootfs.ext4.gz nor initramfs.cpio.gz in the APK: " + e);
+                return;
             }
-            scroll.fullScroll(View.FOCUS_DOWN);
+        }
+
+        int usbfd = -1;
+        if (usbBox.isChecked()) {
+            if (!umusb.exists())
+                log("usb: libumusb.so is not in this build; booting without USB\n");
+            else
+                usbfd = usbOpen();
+        }
+
+        List<String> args = new ArrayList<String>();
+        args.add("mem=" + memField.getText().toString() + "M");
+        args.add("panic=-1");
+        args.add("con=null");
+        args.add("con0=fd:0,fd:1");
+        args.add("stub_exe=" + stub.getAbsolutePath());
+        args.add("seccomp=" + (seccompBox.isChecked() ? "auto" : "off"));
+        if (rootfs != null && rootfs.exists()) {
+            args.add("ubd0=" + rootfs.getAbsolutePath());
+            args.add("root=/dev/ubda");
+            args.add("rw");
+            args.add("init=/umarm-init");
+            args.add("umarm.share=" + getFilesDir().getAbsolutePath());
+        } else {
+            args.add("initrd=" + initrd.getAbsolutePath());
+            args.add("init=/init");
+        }
+
+        /*
+         * umnet and umusb are wrappers: each execs whatever follows its own --,
+         * so the kernel ends up under both. The terminal's pty provider runs the
+         * first one as its "shell". The usbfs descriptor is handed to umusb over
+         * an abstract socket (SCM_RIGHTS) rather than inherited, because the pty
+         * provider closes every descriptor above stderr in the child.
+         */
+        boolean net = netBox.isChecked() && umnet.exists() && passt.exists();
+        String cmd;
+        String[] argv;
+        if (net) {
+            cmd = umnet.getAbsolutePath();
+            List<String> a = new ArrayList<String>();
+            a.add(umnet.getAbsolutePath());
+            a.add("--passt");
+            a.add(passt.getAbsolutePath());
+            a.add("--");
+            a.add(kernel.getAbsolutePath());
+            a.addAll(args);
+            argv = a.toArray(new String[0]);
+        } else {
+            cmd = kernel.getAbsolutePath();
+            List<String> a = new ArrayList<String>();
+            a.add(kernel.getAbsolutePath());
+            a.addAll(args);
+            argv = a.toArray(new String[0]);
+        }
+
+        if (usbfd >= 0) {
+            String sock = "umarm-usb-" + android.os.Process.myPid();
+            usbServe(sock);
+            List<String> a = new ArrayList<String>();
+            a.add(umusb.getAbsolutePath());
+            a.add("--usbsock");
+            a.add(sock);
+            a.add("--listen");
+            a.add("127.0.0.1:3240");
+            a.add("--");
+            a.add(cmd);
+            for (int i = 1; i < argv.length; i++) a.add(argv[i]);
+            cmd = umusb.getAbsolutePath();
+            argv = a.toArray(new String[0]);
+        }
+
+        log("$ " + join(argv) + "\n");
+
+        String[] env = {
+                "PATH=/system/bin:/system/xbin",
+                "HOME=" + getFilesDir().getAbsolutePath(),
+                "TMPDIR=" + getCacheDir().getAbsolutePath(),
+                "TERM=xterm-256color",
+                "LANG=en_US.UTF-8",
+                "ANDROID_ROOT=/system",
+                "ANDROID_DATA=/data",
+        };
+
+        try {
+            /*
+             * A fresh session per boot. transcriptRows is finite: the emulator's
+             * scrollback is RAM, and a kernel that prints for an hour should not
+             * be able to exhaust it.
+             */
+            session = new TerminalSession(cmd, getFilesDir().getAbsolutePath(),
+                    argv, env, 2000, this);
+            terminalView.attachSession(session);
+            terminalView.requestFocus();
+            showKeyboardSoon();
+        } catch (Exception e) {
+            fail("ERROR: could not start the guest: " + e);
         }
     }
 
-    /**
-     * Everything shown in the terminal is also written to files/boot.log.
-     *
-     * The on-screen view is a bounded TextView and the interesting part of a
-     * failed boot is usually the part that has already scrolled away, which
-     * leaves screenshots as the only record -- unreadable past a few hundred
-     * lines, and impossible to grep. The file is the app's own private
-     * storage, so `adb shell run-as org.umarm.debian cat files/boot.log`
-     * retrieves it without root.
-     */
-    private void logToFile(String s) {
-        try {
-            if (logFile == null) {
-                logFile = new java.io.FileOutputStream(
-                        new java.io.File(getFilesDir(), "boot.log"), true);
+    private void stopGuest() {
+        if (session != null) {
+            if (session.isRunning()) session.finishIfRunning();
+        }
+        session = null;
+        startStop.setText("Boot");
+        usbRelease();
+    }
+
+    private void fail(String s) {
+        log(s + "\n");
+        toast(s);
+        startStop.setText("Boot");
+    }
+
+    /* ------------------------------------------------------------------
+     * TerminalSessionClient
+     * ------------------------------------------------------------------ */
+
+    @Override public void onTextChanged(TerminalSession changedSession) {
+        terminalView.onScreenUpdated();
+    }
+
+    @Override public void onTitleChanged(TerminalSession changedSession) {
+        setTitle(changedSession.getTitle() != null ? changedSession.getTitle() : "umarm");
+    }
+
+    @Override public void onSessionFinished(TerminalSession finishedSession) {
+        log("[guest exited]\n");
+        startStop.setText("Boot");
+        usbRelease();
+    }
+
+    @Override public void onCopyTextToClipboard(TerminalSession s, String text) {
+        ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("umarm", text));
+    }
+
+    @Override public void onPasteTextFromClipboard(TerminalSession s) {
+        paste();
+    }
+
+    @Override public void onBell(TerminalSession s) { }
+
+    @Override public void onColorsChanged(TerminalSession s) { }
+
+    @Override public void onTerminalCursorStateChange(boolean state) { }
+
+    @Override public void setTerminalShellPid(TerminalSession s, int pid) {
+        shellPid = pid;
+    }
+
+    @Override public Integer getTerminalCursorStyle() {
+        return null;
+    }
+
+    /* ------------------------------------------------------------------
+     * TerminalViewClient
+     * ------------------------------------------------------------------ */
+
+    @Override public float onScale(float scale) {
+        if (scale < 0.9f || scale > 1.1f) {
+            boolean increase = scale > 1.f;
+            int old = fontSizeSp;
+            fontSizeSp = Math.max(6, Math.min(32, increase ? fontSizeSp + 1 : fontSizeSp - 1));
+            if (fontSizeSp != old) {
+                terminalView.setTextSize(fontSizeSp);
+                prefs.edit().putInt("font", fontSizeSp).apply();
             }
+            return 1.0f;
+        }
+        return scale;
+    }
+
+    @Override public void onSingleTapUp(MotionEvent e) {
+        showKeyboard();
+    }
+
+    @Override public boolean shouldBackButtonBeMappedToEscape() { return false; }
+
+    @Override public boolean shouldEnforceCharBasedInput() { return true; }
+
+    @Override public boolean shouldUseCtrlSpaceWorkaround() { return false; }
+
+    @Override public boolean isTerminalViewSelected() { return true; }
+
+    @Override public void copyModeChanged(boolean copyMode) { }
+
+    @Override public boolean onKeyDown(int keyCode, KeyEvent e, TerminalSession s) {
+        /* The back button leaves the guest alone; it is the only way out of the
+         * Activity and mapping it to Escape would strand the user. */
+        if (keyCode == KeyEvent.KEYCODE_BACK) {
+            return false;
+        }
+        return false;
+    }
+
+    @Override public boolean onKeyUp(int keyCode, KeyEvent e) { return false; }
+
+    @Override public boolean onLongPress(MotionEvent event) { return false; }
+
+    @Override public boolean readControlKey() { return mCtrl; }
+
+    @Override public boolean readAltKey() { return mAlt; }
+
+    @Override public boolean readShiftKey() { return mShift; }
+
+    @Override public boolean readFnKey() { return mFn; }
+
+    @Override public boolean onCodePoint(int codePoint, boolean ctrlDown, TerminalSession s) {
+        /* Let the terminal handle it; the modifier toggles are already folded
+         * into ctrlDown by TerminalView before the call. */
+        return false;
+    }
+
+    @Override public void onEmulatorSet() { }
+
+    @Override public void logError(String tag, String message) { log("E " + tag + ": " + message + "\n"); }
+    @Override public void logWarn(String tag, String message)  { log("W " + tag + ": " + message + "\n"); }
+    @Override public void logInfo(String tag, String message)  { Log.i(tag, message); }
+    @Override public void logDebug(String tag, String message) { Log.d(tag, message); }
+    @Override public void logVerbose(String tag, String message) { Log.v(tag, message); }
+    @Override public void logStackTraceWithMessage(String tag, String message, Exception e) {
+        log("E " + tag + ": " + message + " " + e + "\n");
+    }
+    @Override public void logStackTrace(String tag, Exception e) {
+        log("E " + tag + ": " + e + "\n");
+    }
+
+    /* ------------------------------------------------------------------
+     * Logging. The terminal shows the guest; this is the app's own record,
+     * because the interesting part of a failed boot is usually gone from a
+     * phone screen by the time someone looks.
+     * ------------------------------------------------------------------ */
+
+    private void log(String s) {
+        try {
+            if (logFile == null)
+                logFile = new FileOutputStream(new File(getFilesDir(), "boot.log"), true);
             logFile.write(s.getBytes("UTF-8"));
             logFile.flush();
         } catch (Exception e) {
@@ -267,9 +697,10 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void append(String s) {
-        logToFile(s);
-        ui.post(new Appender(s));
+    private static String join(String[] argv) {
+        StringBuilder b = new StringBuilder();
+        for (String s : argv) { b.append(s); b.append(' '); }
+        return b.toString().trim();
     }
 
     /**
@@ -281,7 +712,7 @@ public class MainActivity extends Activity {
         if (out.exists() && out.length() > 0)
             return out;
 
-        append("unpacking " + asset + " ...\n");
+        toast("unpacking " + asset + " ...");
         InputStream in = getAssets().open(asset);
         if (asset.endsWith(".gz"))
             in = new GZIPInputStream(in, 65536);
@@ -295,10 +726,19 @@ public class MainActivity extends Activity {
         }
         fos.close();
         in.close();
-        append("unpacked " + (total >> 20) + " MB\n");
+        log("unpacked " + asset + " (" + (total >> 20) + " MB)\n");
         return out;
     }
 
+    /**
+     * Run the seccomp probe, if this build has one.
+     *
+     * The seccomp filter zygote installs on this app is inherited by every
+     * process it spawns, including the kernel -- which is why the guest can die
+     * with SIGSYS here but not under `run-as`. The probe runs under that same
+     * filter and reports which syscalls it forbids, because "something was
+     * denied" is not something you can act on.
+     */
     private void runProbe() {
         new Thread(new ProbeRunner()).start();
     }
@@ -308,29 +748,24 @@ public class MainActivity extends Activity {
             try {
                 File p = new File(getApplicationInfo().nativeLibraryDir, "libappseccomp.so");
                 if (!p.exists()) {
-                    append("probe not in this build\n");
+                    toast("probe not in this build");
                     return;
                 }
-                /* The probe is a tracer: run the kernel under it, inside the
-                 * app's own seccomp filter, so a kill that leaves no output
-                 * still yields a signal and a PC. */
                 File k = new File(getApplicationInfo().nativeLibraryDir, "libuml.so");
-                File probe = new File(getApplicationInfo().nativeLibraryDir,
-                        "libprobe.so");
+                File probe = new File(getApplicationInfo().nativeLibraryDir, "libprobe.so");
                 ProcessBuilder pb = probe.exists()
                         ? new ProcessBuilder(probe.getAbsolutePath())
-                        : new ProcessBuilder(p.getAbsolutePath(),
-                                k.getAbsolutePath(), "--version");
+                        : new ProcessBuilder(p.getAbsolutePath(), k.getAbsolutePath(), "--version");
                 pb.redirectErrorStream(true);
                 Process pr = pb.start();
                 BufferedReader r = new BufferedReader(
                         new InputStreamReader(pr.getInputStream()), 8192);
                 String line;
                 while ((line = r.readLine()) != null)
-                    append(line + "\n");
-                append("[probe exited " + pr.waitFor() + "]\n");
+                    log("[probe] " + line + "\n");
+                log("[probe exited " + pr.waitFor() + "]\n");
             } catch (Exception e) {
-                append("probe error: " + e + "\n");
+                log("probe error: " + e + "\n");
             }
         }
     }
@@ -347,27 +782,24 @@ public class MainActivity extends Activity {
      * ------------------------------------------------------------------ */
 
     /*
-     * The Realtek RTL8811AU that the guest's in-tree rtw88 8821au driver
-     * binds. res/xml/device_filter.xml carries the same pair in decimal,
-     * 9047/287, and the two have to be changed together.
+     * The Realtek RTL8811AU that the guest's in-tree rtw88 8821au driver binds.
+     * res/xml/device_filter.xml carries the same pair in decimal, 9047/287, and
+     * the two have to be changed together.
      */
     private static final int USB_VENDOR = 0x2357;
     private static final int USB_PRODUCT = 0x011f;
 
-    /* Our own action: the permission answer arrives as a broadcast. */
     private static final String ACTION_USB_PERMISSION =
             "org.umarm.debian.USB_PERMISSION";
 
-    /* Written by the boot thread, read by the receiver on the main one. */
     private volatile CountDownLatch usbGrant;
     private ParcelFileDescriptor usbPfd;
+    private LocalServerSocket usbServer;
 
     private final class UsbPermission extends BroadcastReceiver {
         @Override public void onReceive(Context c, Intent i) {
             CountDownLatch l = usbGrant;
-
-            if (l != null)
-                l.countDown();
+            if (l != null) l.countDown();
         }
     }
 
@@ -379,169 +811,103 @@ public class MainActivity extends Activity {
         return usbId(d.getVendorId(), d.getProductId());
     }
 
-    /**
-     * Acquire the adapter and return a descriptor umusb can use, or -1.
-     *
-     * Called from the boot thread and blocks there while the permission dialog
-     * is up: the answer is a broadcast, which is delivered on the main thread,
-     * so waiting for it on the main thread would deadlock.
-     *
-     * Every exit prints why. A USB failure that says nothing is
-     * indistinguishable from a kernel that never booted.
-     */
     private int usbOpen() {
         usbRelease();
 
-        UsbManager um = (UsbManager)getSystemService(Context.USB_SERVICE);
+        UsbManager um = (UsbManager) getSystemService(Context.USB_SERVICE);
         if (um == null) {
-            append("usb: no UsbManager -- this phone has no USB host mode\n");
+            log("usb: no UsbManager -- this phone has no USB host mode\n");
             return -1;
         }
 
         UsbDevice dev = null;
         HashMap<String, UsbDevice> devs = um.getDeviceList();
         for (UsbDevice d : devs.values()) {
-            append("usb: sees " + usbId(d) + " " + d.getDeviceName() + "\n");
+            log("usb: sees " + usbId(d) + " " + d.getDeviceName() + "\n");
             if (d.getVendorId() == USB_VENDOR && d.getProductId() == USB_PRODUCT)
                 dev = d;
         }
         if (dev == null) {
-            append("usb: no " + usbId(USB_VENDOR, USB_PRODUCT) + " adapter"
-                    + " among " + devs.size() + " attached device(s);"
-                    + " booting without USB\n");
+            log("usb: no " + usbId(USB_VENDOR, USB_PRODUCT) + " adapter among "
+                    + devs.size() + " attached device(s); booting without USB\n");
             return -1;
         }
 
-        /*
-         * Already granted if the adapter is what launched us: the platform
-         * gives an app permission to the device that matched its
-         * USB_DEVICE_ATTACHED filter, and keeps it until the device is
-         * unplugged.
-         */
         if (!um.hasPermission(dev)) {
-            append("usb: asking for permission to " + usbId(dev) + " ...\n");
+            log("usb: asking for permission to " + usbId(dev) + " ...\n");
             usbGrant = new CountDownLatch(1);
-
             UsbPermission recv = new UsbPermission();
             IntentFilter filter = new IntentFilter(ACTION_USB_PERMISSION);
-
             try {
-                /*
-                 * targetSdk 34 refuses an unflagged registerReceiver for an
-                 * action the system does not own. The grant is sent through
-                 * our own PendingIntent, so it arrives under our uid and
-                 * NOT_EXPORTED still receives it -- while EXPORTED would let
-                 * any other app on the phone forge one.
-                 */
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
-                    registerReceiver(recv, filter,
-                            Context.RECEIVER_NOT_EXPORTED);
+                    registerReceiver(recv, filter, Context.RECEIVER_NOT_EXPORTED);
                 else
                     registerReceiver(recv, filter);
 
                 try {
-                    Intent i = new Intent(ACTION_USB_PERMISSION)
-                            .setPackage(getPackageName());
-                    /*
-                     * From API 31 getBroadcast() throws unless it is told
-                     * IMMUTABLE or MUTABLE. Immutable is the safe one, and the
-                     * price is that the system cannot fill
-                     * EXTRA_PERMISSION_GRANTED into the intent it sends back:
-                     * an immutable PendingIntent ignores the fill-in intent.
-                     * So the broadcast is only a wake-up and hasPermission()
-                     * below is the answer.
-                     */
+                    Intent i = new Intent(ACTION_USB_PERMISSION).setPackage(getPackageName());
                     int flags = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
                             ? PendingIntent.FLAG_IMMUTABLE : 0;
-
-                    um.requestPermission(dev, PendingIntent.getBroadcast(
-                            this, 0, i, flags));
+                    um.requestPermission(dev, PendingIntent.getBroadcast(this, 0, i, flags));
                     if (!usbGrant.await(60, TimeUnit.SECONDS))
-                        append("usb: the permission dialog went unanswered"
-                                + " for 60s\n");
+                        log("usb: the permission dialog went unanswered for 60s\n");
                 } finally {
                     unregisterReceiver(recv);
                 }
             } catch (Exception e) {
-                append("usb: permission request failed: " + e + "\n");
+                log("usb: permission request failed: " + e + "\n");
+                usbGrant = null;
                 return -1;
             } finally {
                 usbGrant = null;
             }
 
             if (!um.hasPermission(dev)) {
-                append("usb: permission denied; booting without USB\n");
+                log("usb: permission denied; booting without USB\n");
                 return -1;
             }
-            append("usb: permission granted\n");
+            log("usb: permission granted\n");
         }
 
         UsbDeviceConnection conn = um.openDevice(dev);
         if (conn == null) {
-            append("usb: openDevice(" + usbId(dev) + ") failed"
-                    + " -- unplugged since the scan?\n");
+            log("usb: openDevice(" + usbId(dev) + ") failed -- unplugged since the scan?\n");
             return -1;
         }
         try {
-            /*
-             * UsbDeviceConnection owns the descriptor and closes it from its
-             * finalize(), which would pull it out from under umusb as soon as
-             * the object became garbage. Dup it instead: the copy names the
-             * same open usbfs file -- same claimed interfaces, same URB queue
-             * -- and nothing but this class can close it.
-             */
             ParcelFileDescriptor theirs =
                     ParcelFileDescriptor.adoptFd(conn.getFileDescriptor());
             try {
                 usbPfd = ParcelFileDescriptor.dup(theirs.getFileDescriptor());
             } finally {
-                /* adoptFd() was only a handle to dup from; the descriptor
-                 * itself still belongs to the connection. */
                 theirs.detachFd();
             }
-            /*
-             * Descriptors that arrive over binder come with O_CLOEXEC, and
-             * ParcelFileDescriptor.dup() puts it back on the copy. Left set,
-             * the number on umusb's command line would name a descriptor that
-             * exec had already closed.
-             */
             Os.fcntlInt(usbPfd.getFileDescriptor(), OsConstants.F_SETFD, 0);
         } catch (Exception e) {
-            append("usb: cannot take over the descriptor: " + e + "\n");
+            log("usb: cannot take over the descriptor: " + e + "\n");
             usbRelease();
             conn.close();
             return -1;
         }
-        /* The dup holds the usbfs file open; this only drops the framework's
-         * own reference to it. */
         conn.close();
 
         int fd = usbPfd.getFd();
-
-        append("usb: " + usbId(dev) + " " + dev.getDeviceName()
-                + " opened, fd " + fd + "\n");
+        log("usb: " + usbId(dev) + " " + dev.getDeviceName() + " opened, fd " + fd + "\n");
         return fd;
     }
 
     /*
      * Hand the usbfs descriptor to umusb over an abstract unix socket.
      *
-     * Not on the command line: measured on this device, a descriptor this app
-     * opens does not survive the spawn -- "a child's /proc/self/fd has no
-     * /dev/bus/usb entry" -- because ART's process spawn closes everything
-     * above stderr in the child before exec, as OpenJDK's childproc.c does.
-     * FD_CLOEXEC is irrelevant to that; the descriptor has to be sent, not
-     * named. SCM_RIGHTS installs a fresh one in umusb's table.
-     *
-     * Abstract namespace: a socket file under the app's own directory is not
-     * something an exec'd child of the app is allowed to connect to, and there
-     * is nothing to clean up afterwards.
+     * The pty provider closes every descriptor above stderr in the child before
+     * exec, so a descriptor this app opens cannot be inherited by number.
+     * SCM_RIGHTS installs a fresh one in umusb's table instead.
      */
     private void usbServe(final String name) {
         try {
             usbServer = new LocalServerSocket(name);
         } catch (IOException e) {
-            append("usb: cannot listen on @" + name + ": " + e + "\n");
+            log("usb: cannot listen on @" + name + ": " + e + "\n");
             return;
         }
         new Thread(new UsbServer(name)).start();
@@ -556,241 +922,42 @@ public class MainActivity extends Activity {
             try {
                 LocalSocket s = usbServer.accept();
                 FileDescriptor[] fds = { usbPfd.getFileDescriptor() };
-
                 s.setFileDescriptorsForSend(fds);
                 s.getOutputStream().write(0);
                 s.getOutputStream().flush();
                 s.close();
-                append("usb: descriptor sent to umusb\n");
+                log("usb: descriptor sent to umusb\n");
             } catch (Exception e) {
-                append("usb: handing over the descriptor failed: " + e + "\n");
+                log("usb: handing over the descriptor failed: " + e + "\n");
             }
         }
     }
 
     private void usbRelease() {
-        if (usbPfd == null)
-            return;
-        try {
-            usbPfd.close();
-        } catch (IOException e) {
-            /* Deliberately dropping this descriptor; a failed close is not
-             * something the caller can act on. */
-        }
-        usbPfd = null;
-    }
-
-    /**
-     * Ask a child process what it inherited, and say so.
-     *
-     * ProcessBuilder is not execve(): OpenJDK's child closes every descriptor
-     * above stderr before it execs, and libcore's process code descends from
-     * it. Measured on this project's build machine (JDK 21): a descriptor with
-     * FD_CLOEXEC clear is listed in the JVM's own /proc/self/fd and absent
-     * from the child's. Whether ART does the same is a question only the phone
-     * can answer -- and if it does, umusb gets EBADF on --usbfd and every URB
-     * fails with nothing in the log pointing at the cause. So one child, once,
-     * to make the answer part of the boot log.
-     */
-    /*
-     * Does a descriptor we opened reach a child across exec?
-     *
-     * Clearing FD_CLOEXEC is necessary and may not be sufficient: OpenJDK's
-     * childproc.c, which ART's ProcessImpl descends from, walks /proc/self/fd
-     * in the child and closes everything above stderr before exec'ing. Whether
-     * this particular Android does that is a question about the device, so ask
-     * the device: spawn a child the same way the kernel is spawned and see
-     * whether the usbfs descriptor is in its table.
-     */
-    private boolean usbCheckInherit(int fd) {
-        try {
-            Process p = new ProcessBuilder("/system/bin/ls", "-l",
-                    "/proc/self/fd").redirectErrorStream(true).start();
-            BufferedReader r = new BufferedReader(
-                    new InputStreamReader(p.getInputStream()), 4096);
-            String seen = null;
-            String line;
-
-            while ((line = r.readLine()) != null)
-                if (line.contains("/dev/bus/usb"))
-                    seen = line.trim();
-            p.waitFor();
-
-            if (seen != null) {
-                append("usb: descriptor survives exec (" + seen + ")\n");
-                return true;
-            }
-            append("usb: a child's /proc/self/fd has no /dev/bus/usb entry --"
-                    + " fd " + fd + " would reach umusb closed\n");
-            return false;
-        } catch (Exception e) {
-            append("usb: inheritance check did not run: " + e + "\n");
-            return false;
-        }
-    }
-
-    /*
-     * USB_DEVICE_ATTACHED started or resumed us. Worth a line: it is the one
-     * route to the adapter that needs no permission dialog.
-     */
-    private void usbAttachNotice(Intent i) {
-        if (i == null ||
-            !UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(i.getAction()))
-            return;
-
-        UsbDevice d = (UsbDevice)i.getParcelableExtra(UsbManager.EXTRA_DEVICE);
-
-        append("usb: " + (d != null ? usbId(d) : "a device")
-                + " attached -- tick 'usb' and Boot\n");
-    }
-
-    private void boot() {
-        startStop.setText("Stop");
-        new Thread(new Runnable() { @Override public void run() { bootThread(); } }).start();
-    }
-
-    private void bootThread() {
-        try {
-            String libdir = getApplicationInfo().nativeLibraryDir;
-            File kernel = new File(libdir, "libuml.so");
-            File stub = new File(libdir, "libstub.so");
-            File umnet = new File(libdir, "libumnet.so");
-            File passt = new File(libdir, "libpasst.so");
-            File umusb = new File(libdir, "libumusb.so");
-
-            if (!kernel.exists()) {
-                append("ERROR: " + kernel + " missing from the APK\n");
-                return;
-            }
-
-            File initrd = unpackAsset("initramfs.cpio.gz", "initramfs.cpio.gz");
-            File rootfs = null;
+        if (usbPfd != null) {
             try {
-                rootfs = unpackAsset("rootfs.ext4.gz", "rootfs.ext4");
+                usbPfd.close();
             } catch (IOException e) {
-                /* Optional: the smaller build ships only an initramfs. */
+                /* Deliberately dropping this descriptor; a failed close is not
+                 * something the caller can act on. */
             }
-
-            int usbfd = -1;
-            if (usbBox.isChecked()) {
-                if (!umusb.exists())
-                    append("usb: libumusb.so is not in this build;"
-                            + " booting without USB\n");
-                else
-                    usbfd = usbOpen();
+            usbPfd = null;
+        }
+        if (usbServer != null) {
+            try {
+                usbServer.close();
+            } catch (IOException e) {
+                /* Same. */
             }
-
-            List<String> cmd = new ArrayList<String>();
-            boolean net = netBox.isChecked() && umnet.exists() && passt.exists();
-            if (net) {
-                cmd.add(umnet.getAbsolutePath());
-                cmd.add("--passt");
-                cmd.add(passt.getAbsolutePath());
-                cmd.add("--");
-            }
-            /*
-             * umusb nests inside umnet: each wrapper execs whatever follows
-             * its own --, so with both on, the kernel runs under both and ends
-             * up with the vec0 argument umnet appends as well as whatever
-             * umusb appends. The descriptor is passed by number, which is why
-             * usbOpen() had to clear FD_CLOEXEC on it.
-             */
-            if (usbfd >= 0) {
-                String sock = "umarm-usb-" + android.os.Process.myPid();
-
-                usbServe(sock);
-                cmd.add(umusb.getAbsolutePath());
-                cmd.add("--usbsock");
-                cmd.add(sock);
-                /*
-                 * The guest cannot attach to a socket of ours: vhci's
-                 * attach_store() resolves the number it is given in the fd
-                 * table of the process writing to sysfs, which is a guest
-                 * process. So umusb listens instead, and the guest connects
-                 * out through passt -- which is why usb needs net.
-                 */
-                cmd.add("--listen");
-                cmd.add("127.0.0.1:3240");
-                cmd.add("--");
-            }
-            cmd.add(kernel.getAbsolutePath());
-            cmd.add("mem=" + memField.getText().toString() + "M");
-            cmd.add("panic=-1");
-            cmd.add("con=null");
-            cmd.add("con0=fd:0,fd:1");
-            /* The whole reason this app can work at all: exec the stub from
-             * the APK's library directory rather than from a memfd. */
-            cmd.add("stub_exe=" + stub.getAbsolutePath());
-            cmd.add("seccomp=" + (seccompBox.isChecked() ? "auto" : "off"));
-            if (rootfs != null && rootfs.exists()) {
-                cmd.add("ubd0=" + rootfs.getAbsolutePath());
-                cmd.add("root=/dev/ubda");
-                cmd.add("rw");
-                cmd.add("init=/umarm-init");
-                cmd.add("umarm.share=" + getFilesDir().getAbsolutePath());
-            } else {
-                cmd.add("initrd=" + initrd.getAbsolutePath());
-                cmd.add("init=/init");
-            }
-
-            append("$ " + join(cmd) + "\n\n");
-
-            ProcessBuilder pb = new ProcessBuilder(cmd);
-            pb.redirectErrorStream(true);
-            pb.directory(getFilesDir());
-            /* No /tmp in an app sandbox; guest RAM is backed from the cache
-             * directory instead. HOME is where UML puts its umid. */
-            pb.environment().put("TMPDIR", getCacheDir().getAbsolutePath());
-            pb.environment().put("HOME", getFilesDir().getAbsolutePath());
-
-            guest = pb.start();
-            guestIn = guest.getOutputStream();
-
-            BufferedReader r = new BufferedReader(
-                    new InputStreamReader(guest.getInputStream()), 8192);
-            String line;
-            while ((line = r.readLine()) != null)
-                append(line + "\n");
-
-            int rc = guest.waitFor();
-            append("\n[guest exited, status " + rc + "]\n");
-        } catch (Exception e) {
-            append("\nERROR: " + e + "\n");
-        } finally {
-            guest = null;
-            guestIn = null;
-            /* Hand the adapter back. Interfaces claimed through this usbfs
-             * file stay claimed for as long as any descriptor on it is open,
-             * so holding the dup after the guest is gone would leave the
-             * device claimed by nobody in particular. */
-            usbRelease();
-            ui.post(new Runnable() {
-                @Override public void run() { startStop.setText("Boot"); }
-            });
+            usbServer = null;
         }
     }
 
-    private void send(String s) {
-        if (guestIn == null) {
-            append("[not running]\n");
+    private void usbAttachNotice(Intent i) {
+        if (i == null || !UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(i.getAction()))
             return;
-        }
-        try {
-            guestIn.write((s + "\n").getBytes("UTF-8"));
-            guestIn.flush();
-        } catch (IOException e) {
-            append("[write failed: " + e + "]\n");
-        }
-    }
-
-    private void stop() {
-        if (guest != null)
-            guest.destroy();
-    }
-
-    private static String join(List<String> l) {
-        StringBuilder b = new StringBuilder();
-        for (String s : l) { b.append(s); b.append(' '); }
-        return b.toString().trim();
+        UsbDevice d = (UsbDevice) i.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+        log("usb: " + (d != null ? usbId(d) : "a device")
+                + " attached -- tick 'usb' in Settings and Boot\n");
     }
 }

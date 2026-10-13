@@ -267,3 +267,34 @@ pristine copy on the device and restores it before each run.
 * **`make_umid()`'s segfault on a failed mkdir** (item 4 above) is worked around,
   not fixed.
 * **The flake loop has never run here.** Every result above is a single run.
+
+## The app is a real terminal now
+
+`dist/umapp` began as a console: a scrolling `TextView` and a line-input box,
+which could show a boot log and nothing else -- no ANSI, no cursor addressing,
+no line editing, so no interactive program could run in the guest.
+
+It now uses Termux's own terminal emulator, vendored as sources under
+`dist/umapp/src/com/termux/` (`terminal-emulator` and `terminal-view`, Apache
+2.0, see `dist/umapp/VENDORED-TERMUX.md`). The console is a pseudoterminal: a
+copy of Termux's `jni/termux.c` is built as `libtermux.so`, and
+`TerminalSession` opens `/dev/ptmx`, forks and execs the kernel with the pty as
+fd 0/1/2, so `con0=fd:0,fd:1` is a tty and `SIGWINCH`/`TIOCSWINSZ` behave. The
+app is built without Gradle, so three adjustments are documented in that file:
+`aapt2 --extra-packages` supplies the `com.termux.view.R` the sources refer to,
+three `androidx.annotation` markers are stubbed, and two cosmetic drawables use
+a literal color instead of a Material theme attribute.
+
+The guest is now the same Alpine + Docker + OpenRC image `alpine-um` boots
+(`alpine-docker.ext4`, gzipped into `assets/rootfs.ext4.gz`), not just the small
+Alpine initramfs: the app unpacks it, boots `init=/umarm-init`, and the image's
+init brings up the network, openrc and dockerd before giving a login shell. The
+initramfs is still the fallback for a build without the image. Settings (RAM,
+seccomp, net, usb) moved into a menu; the terminal owns the screen, with an
+extra-keys row (Ctrl/Alt/Shift/Fn/Esc/Tab/arrows/`^C`/`^D`/paste) and the USB
+passthrough unchanged.
+
+The APK is large because it carries the image (a kernel plus a Docker guest);
+`harness/ci-umapp.sh` is the signature/manifest/contents check and now also
+asserts the terminal classes in `classes.dex`, the pty entry point in
+`libtermux.so`, and the rootfs asset.

@@ -249,65 +249,16 @@ done
 NET
 chmod 0755 "$SHARE/umalpine-net.sh"
 
-# The Docker bring-up, injected the same way as the network so it can change
-# without rebuilding the disk. It is three things the minirootfs does not do
-# for itself: mount cgroup v2, clear the pidfile and socket a killed dockerd
-# leaves behind (this image's /var/run is not a tmpfs, so they survive a
-# poweroff and the next daemon refuses to start), and start the daemon.
-if [ "$DOCKER" = 1 ]; then
-	cat > "$SHARE/umalpine-docker.sh" <<'DOCKER'
-#!/bin/sh
-# Bring dockerd up. cgroup v2 is what Docker uses on this kernel and nothing
-# in the minirootfs mounts it, so the daemon would start with no controllers.
-if [ ! -e /sys/fs/cgroup/cgroup.controllers ]; then
-	mkdir -p /sys/fs/cgroup
-	mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null
-fi
-# The bridge and veth drivers log every port state change at KERN_INFO, and the
-# guest console prints whatever is at or above console_loglevel. At the default
-# (7) a one-line `docker run` is buried under a dozen "docker0: port 1(veth...)
-# entered blocking state" lines. Raising the threshold to 4 keeps warnings,
-# errors and BUGs -- which is what the port's own gates scan for -- and drops
-# the INFO chatter. `dmesg -n 4` is the same thing with busybox, but writing the
-# sysctl is one less thing to depend on.
-[ -w /proc/sys/kernel/printk ] && echo 4 > /proc/sys/kernel/printk
-# /run is a real directory in this image, not a tmpfs, so a daemon killed by the
-# poweroff leaves its state behind. dockerd complains about /run/docker.pid and
-# /run/docker.sock; its managed containerd keeps /run/docker/containerd/ and is
-# the one that actually stops the second boot, with
-#   failed to save daemon pid to disk: process with PID N is still running
-# because the PID in the stale pidfile has been reused. Both trees are pure
-# runtime state -- dockerd recreates them -- so they go.
-rm -rf /var/run/docker /var/run/containerd
-rm -f /var/run/docker.pid /var/run/docker.sock
-mkdir -p /var/log
-if ! command -v dockerd >/dev/null 2>&1; then
-	echo "umalpine: no dockerd in this image -- this is the Alpine image, not the docker one" >&2
-	echo "umalpine: install it with: apk add e2fsprogs-extra && resize2fs /dev/ubda && apk add docker" >&2
-else
-	dockerd > /var/log/dockerd.log 2>&1 &
-	i=0
-	while [ ! -S /var/run/docker.sock ] && [ "$i" -lt 30 ]; do
-		sleep 1; i=$((i + 1))
-	done
-	if [ -S /var/run/docker.sock ] && docker info >/dev/null 2>&1; then
-		echo "umalpine: dockerd up ($(docker version --format '{{.Server.Version}}' 2>/dev/null))"
-	else
-		echo "umalpine: dockerd did not come up; /var/log/dockerd.log follows" >&2
-		tail -30 /var/log/dockerd.log >&2
-	fi
-fi
-DOCKER
-	chmod 0755 "$SHARE/umalpine-docker.sh"
-fi
+# The Docker bring-up used to be injected here as /host/umalpine-docker.sh.
+# It now lives in the image's /umarm-init (harness/guest/umarm-init-alpine),
+# which is also what boots it: the daemon has to come up before the one-shot
+# command runs and before the interactive shell starts, and an init that does
+# it is the same path the Android app takes. The ALTERNATIVE -- two scripts
+# racing to start dockerd and to clear /run/docker -- is what this replaced.
 
-# What /umarm-init runs before the shell or the command. The network is always
-# first; the daemon needs it to reach a registry.
-GUEST_PROLOGUE='. /host/umalpine-net.sh'
-if [ "$DOCKER" = 1 ]; then
-	GUEST_PROLOGUE="$GUEST_PROLOGUE
-. /host/umalpine-docker.sh"
-fi
+# /umarm-init reads these two files itself (and has a fallback for the network
+# when there is no launcher, which is the app's case), so there is no command
+# prologue to inject.
 
 # --- command line -----------------------------------------------------------
 MEM=${UMALPINE_MEM:-512M}
@@ -329,8 +280,9 @@ export HOME="${HOME:-$SHARE}"          # UML builds its umid dir from $HOME
 # --- run --------------------------------------------------------------------
 if [ -n "$CMD" ]; then
 	# One-shot. The command travels through the share rather than the kernel
-	# command line, which cannot carry spaces or quoting.
-	{ printf '%s\n' "$GUEST_PROLOGUE"; printf '%s\n' "$CMD"; } > "$SHARE/cmd"
+	# command line, which cannot carry spaces or quoting. The guest's init runs
+	# it after the network and dockerd are up.
+	printf '%s\n' "$CMD" > "$SHARE/cmd"
 	log "booting $KERNEL with $IMAGE (one-shot)"
 	out=$(timeout "${UMALPINE_TIMEOUT:-300}" "${NET_CMD[@]}" \
 		"$KERNEL" "${COMMON[@]}" con0=null,fd:1 2>&1 | cat)
@@ -350,21 +302,11 @@ if [ -n "$CMD" ]; then
 	die "the guest never reached the command; the full boot log is above"
 fi
 
-# Interactive. The same hostfs injection, ending in an interactive shell. con0
-# must be a pollable descriptor: UML registers it with epoll, and a pipe or
-# /dev/null makes epoll_ctl fail, after which the console goes silent and a
-# terminal that was not there looks like a boot that never finished.
-{
-	printf '%s\n' "$GUEST_PROLOGUE"
-	cat <<'ONE'
-printf 'umalpine: Alpine %s aarch64, kernel %s\n' "$(cat /etc/alpine-release 2>/dev/null)" "$(uname -r)"
-printf "umalpine: internet check:  wget -O- http://example.com | head   /   nslookup example.com 1.1.1.1\n"
-printf "umalpine: docker check:    docker run --rm hello-world\n"
-printf "umalpine: 'exit' (or Ctrl-D) leaves the guest.\n"
-exec /bin/sh -l
-ONE
-} > "$SHARE/cmd"
-
+# Interactive. Nothing is written to the share: /umarm-init brings the network
+# and dockerd up and drops to a login shell on its own. con0 must be a pollable
+# descriptor -- UML registers it with epoll, and a pipe or /dev/null makes
+# epoll_ctl fail, after which the console goes silent and a terminal that was
+# not there looks like a boot that never finished.
 if [ ! -t 0 ]; then
 	echo "umalpine: stdin is not a terminal; run this from an interactive shell," >&2
 	echo "          or pass a command: $0 -c 'uname -a'" >&2
