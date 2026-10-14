@@ -209,18 +209,21 @@ con `debugfs`:
 /etc/doas.d/doas.conf    permit nopass :wheel
 ```
 
-**Causa.** `apk --root` **no aplica los bits setuid/setgid** al extraer. El
-paquete sí los trae: `doas-6.8.2-r8.apk` de `main/aarch64` tiene
-`-rwsr-xr-x root/root usr/bin/doas`. Los otros dos sospechosos están descartados,
-medidos en el teléfono:
+**Causa.** El bit lo borra el `chown -R 0:0` que arregla los user namespaces:
+`chown_common()` marca `ATTR_KILL_SUID` en todo lo que no sea un directorio,
+corra quien corra el chown (`fs/open.c`), y ese chown pasa después de extraer.
+`apk --root` tampoco aplica setuid/setgid al extraer (el paquete sí lo trae:
+`doas-6.8.2-r8.apk` de `main/aarch64` tiene `-rwsr-xr-x root/root usr/bin/doas`),
+pero da igual: **cualquier** `chmod` puesto antes del `chown` se pierde. Los otros
+dos sospechosos están descartados, medidos en el teléfono:
 
 - `chmod -R a+rX` sobre un archivo 4755 lo deja en 4755;
 - `mke2fs -q -t ext4 -d <stage>` sobre un stage con 4755/2755/0755 los deja en
   04755/02755/0755.
 
-O sea que el bit se pierde en el `add` y la imagen sale en 0755. La del teléfono
-sí lo tiene (`alpine.ext4`: `/usr/bin/doas` = 04755) sólo porque ahí
-`apk add doas` se corrió **dentro** del guest, con el filesystem ya montado.
+La del teléfono sí lo tiene (`alpine.ext4`: `/usr/bin/doas` = 04755) sólo porque
+ahí `apk add doas` se corrió **dentro** del guest, después del chown y con el
+filesystem ya montado.
 
 **Por qué CI no lo dijo.** `harness/guest/console-init` tenía
 `fail() { echo "GATE_CONSOLE_FAIL $*"; }` —sin `exit`—, así que seguía hasta el
@@ -237,20 +240,23 @@ arregle, y ese es el estado honesto.
 1. `harness/guest/console-init`: `fail() { echo "GATE_CONSOLE_FAIL $*"; exit 1; }`.
    Sin el `exit`, el gate seguía de largo e imprimía `UMARM_CONSOLE_OK`, que es
    lo único que `native.sh` mira. Todos los demás gates ya salían con `exit 1`.
-2. `harness/mkdockerimage.sh`: devuelve el bit después del `apk add`, con la
-   verificación al lado, porque `--root` lo borra en silencio:
+2. `harness/mkdockerimage.sh`: devuelve el bit **después** del `chown -R 0:0` y
+del `chmod -R a+rX`, con la verificación al lado:
 
    ```sh
    $SUDO chmod 4755 "$STAGE/usr/bin/doas"
    [ -u "$STAGE/usr/bin/doas" ] || {
-       echo "mkdockerimage.sh: /usr/bin/doas is not setuid after the install" >&2
+       echo "mkdockerimage.sh: /usr/bin/doas is not setuid in the staged tree" >&2
        exit 2
    }
    ```
 
-   (El `chmod -R a+rX` posterior no lo borra, está medido arriba.) Se revisó si
-   otro paquete trae setuid: para esta lista el único es `doas` —el busybox de
-   Alpine no es setuid, y `sudo`, `su` y `passwd` no están instalados.
+   El primer intento lo puso justo después del `apk add` y el gate recién
+   arreglado lo cazó: la imagen salía 0755 igual, porque el `chown` posterior
+   borraba el bit. Eso es lo que el gate tenía que haber hecho desde el
+   principio. Se revisó si otro paquete trae setuid: para esta lista el único es
+   `doas` —el busybox de Alpine no es setuid, y `sudo`, `su` y `passwd` no están
+   instalados.
 
 **Verificación.** El gate `console` pasa ahora *pudiendo* fallar. Después: el job
 `build` reconstruye la imagen y `publish` saca un `rootfs-*` nuevo solo —los dos

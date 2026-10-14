@@ -82,20 +82,6 @@ $SUDO "$LOADER" --library-path "$STAGE/lib:$STAGE/usr/lib" "$APK" \
 	--keys-dir "$STAGE/etc/apk/keys" \
 	add $PACKAGES
 
-# apk --root unpacks mode & 0777: it drops setuid/setgid on the way in, so doas
-# arrived 0755 and the wizard's non-root user could not become root ("doas: not
-# installed setuid"). The package does ship -rwsr-xr-x; only the foreign-root
-# extraction loses it. Put the bit back here, next to the install that lost it,
-# and refuse to produce an image without it -- the failure is otherwise silent
-# until someone tries to use the app as its own user. chmod -R a+rX below does
-# not flatten it (measured). doas is the only setuid file in $PACKAGES: Alpine's
-# busybox is not setuid, and sudo/su/passwd are not installed.
-$SUDO chmod 4755 "$STAGE/usr/bin/doas"
-[ -u "$STAGE/usr/bin/doas" ] || {
-	echo "mkdockerimage.sh: /usr/bin/doas is not setuid after the install" >&2
-	exit 2
-}
-
 echo "== guest-side files ==" >&2
 # Every gate init, the Alpine PID 1 (which the loop would otherwise overwrite
 # with the Debian guest/umarm-init of the same name), and the power-off helper.
@@ -136,10 +122,28 @@ $SUDO ln -sfn /etc/init.d/docker "$STAGE/etc/runlevels/default/docker"
 
 echo "== ownership and modes ==" >&2
 # See the header: this is the userns fix, not tidiness. a+rX makes every path
-# readable and traversable/executable without flattening setuid (doas is one),
-# setgid or the sticky bit on /tmp. /etc/shadow and /root are put back private.
+# readable and traversable/executable and preserves whatever setuid/setgid/sticky
+# bits are already there. The chown above is what clears doas's setuid bit (see
+# below); /etc/shadow and /root are put back private.
 $SUDO chown -R 0:0 "$STAGE"
 $SUDO chmod -R a+rX "$STAGE"
+
+# setuid has to be restored *after* both of those, and this is the whole bug:
+# doas ships -rwsr-xr-x, arrives without the bit (apk --root unpacks mode &
+# 0777, and chown_common() clears S_ISUID on every non-directory it touches
+# whatever uid runs it -- fs/open.c sets ATTR_KILL_SUID unconditionally -- and
+# the tree is chowned to root just above), and a chmod next to the install is
+# silently undone by that same chown. Without the bit the wizard's non-root user
+# gets "doas: not installed setuid" and cannot become root, which is invisible
+# to root and until recently invisible to the console gate too. Refuse to
+# produce an image without it. doas is the only setuid file in $PACKAGES:
+# Alpine's busybox is not setuid, and sudo/su/passwd are not installed.
+$SUDO chmod 4755 "$STAGE/usr/bin/doas"
+[ -u "$STAGE/usr/bin/doas" ] || {
+	echo "mkdockerimage.sh: /usr/bin/doas is not setuid in the staged tree" >&2
+	exit 2
+}
+
 $SUDO chmod 0640 "$STAGE/etc/shadow" "$STAGE/etc/gshadow" 2>/dev/null || true
 $SUDO chmod 0700 "$STAGE/root" 2>/dev/null || true
 
