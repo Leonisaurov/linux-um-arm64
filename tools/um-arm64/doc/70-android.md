@@ -298,3 +298,38 @@ The APK is large because it carries the image (a kernel plus a Docker guest);
 `harness/ci-umapp.sh` is the signature/manifest/contents check and now also
 asserts the terminal classes in `classes.dex`, the pty entry point in
 `libtermux.so`, and the rootfs asset.
+
+### The console: a controlling tty, and a first-run user
+
+Two things the app's shell needed beyond "the pty exists", both found by using
+it.
+
+**A controlling terminal.** `con0=fd:0,fd:1` gives the guest `/dev/console` as
+fd 0, so `[ -t 0 ]` is true -- but nothing has made it the *controlling*
+terminal. PID 1 is in a session with none, so `open("/dev/tty")` fails: busybox
+ash prints "can't access tty; job control turned off" and bash prints "cannot
+set terminal process group (-1)". The fix is a new session whose leader opens
+the console tty (`setsid`, then open `/dev/tty0`): the first tty a session
+leader opens becomes its controlling terminal. The line this replaced asked
+busybox `setsid` for `-w`, which it does not have, so it failed instantly and
+the `else` shell had no tty at all; this image also has no `cttyhack`.
+`harness/guest/console-init` is the gate, booted as `init=/console-init`.
+
+**A user, and the permissions to be one.** The image ran everything as root, and
+that hid a build bug: the minirootfs is extracted by an unprivileged user, and
+tar applies the build umask (`--no-same-permissions` is its default for
+non-root), so `/etc/passwd` and `/etc/group` came out 0600. Root reads them
+through `CAP_DAC_OVERRIDE` and never noticed; a non-root user cannot, so `id`
+printed "unknown ID 1000" and `login` behaved oddly. `mkrootfs.sh` and
+`mkdockerimage.sh` now extract with `-p` and then `chmod -R a+rX`, which restores
+read and execute without flattening setuid or the sticky bit on `/tmp`, and put
+`/etc/shadow` back to 0640 and `/root` to 0700. The image also installs `doas`
+with `permit nopass :wheel`, because the minirootfs ships no setuid busybox and
+a non-root user has no other way to reach root.
+
+On the first app boot the guest offers to create that user: the app writes
+`first-run` into its files directory when it unpacks the image, `umarm-init`
+turns it into a wizard (username, password, optional root password), adds the
+user to `wheel` and `docker`, records it in `/var/lib/umarm/user`, and from then
+on logs in as it. The marker is written by the app and removed by the guest, so
+the harness and the gates boot the image unchanged and as root.

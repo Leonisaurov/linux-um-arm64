@@ -17,7 +17,9 @@
 #     launcher's interactive mode uses the same file, ending it with an
 #     `exec /bin/sh -l`; when that shell exits, this script powers the guest off.
 #
-#   * Interactive mode. No <share>/cmd, so give a login shell on the console.
+#   * Interactive mode. No <share>/cmd: create the user on first boot if
+#     <share>/first-run asks for it, then give a login shell on the console,
+#     in a session whose controlling terminal is the console tty.
 #
 #   * <share>/umalpine-hostname, if the launcher wrote one, names the machine.
 #
@@ -216,12 +218,97 @@ if [ -s /host/cmd ]; then
 fi
 
 # --- interactive ------------------------------------------------------------
+# The console needs a *controlling* terminal, and the first run offers to make
+# a user.
+#
+# The kernel starts init in a session with no controlling terminal: fd 0 is
+# /dev/console, so isatty() says yes, but open("/dev/tty") fails, bash reports
+# "cannot set terminal process group (-1)" and ash turns job control off with
+# "can't access tty". A new session whose leader opens the console tty claims
+# it -- the first tty a session leader opens becomes its controlling terminal.
+# The line this replaces asked busybox setsid for -w, which it does not have, so
+# it failed instantly and the fallback shell had no tty at all; this image also
+# has no cttyhack.
+#
+# The wizard/shell lives in /run so it can be exec'd inside that session. The
+# shell exiting returns here, and this is where the guest powers off, so it is a
+# child and not an exec of this script.
+CTTY=
+for t in /dev/tty0 /dev/console; do
+	[ -c "$t" ] && { CTTY=$t; break; }
+done
+[ -n "$CTTY" ] || CTTY=/dev/console
+
+cat > /run/umarm-console <<'UMARM_CONSOLE_EOF'
+#!/bin/sh
+# The interactive console. Runs under a new session whose controlling terminal
+# is the console tty (see /umarm-init), so job control, ^C and window-size
+# changes work. BSD-style `login -f` would be another way to seed the session;
+# this keeps the setup where the image can be read.
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+export PATH
+
 echo "umarm: Alpine $(cat /etc/alpine-release 2>/dev/null) $(uname -m) on $(uname -sr)"
-echo "umarm: files in /host are shared with the device; 'exit' powers off"
-if command -v setsid >/dev/null 2>&1 && setsid -w -c /bin/sh -l 2>/dev/null; then
-	:
+echo "umarm: /host is shared with the device and keeps your changes; 'exit' powers off"
+
+# --- first run: a non-root user ---------------------------------------------
+# <share>/first-run is written by the Android app when it unpacks the image, so
+# the wizard is an app boot and never a harness one. /var/lib/umarm/user is the
+# record that it already ran: a reinstall that re-extracts the image starts over,
+# a second boot does not.
+if [ -e /host/first-run ] && [ ! -s /var/lib/umarm/user ]; then
+	echo
+	echo "First boot: let's create the user you will work as."
+	echo "It joins 'wheel' and 'docker', so docker needs no sudo and 'doas'"
+	echo "gets you root."
+	echo
+	U=
+	while :; do
+		printf 'Username: '
+		read -r U || break
+		[ -n "$U" ] || { echo "  a name is required"; continue; }
+		[ "$U" = root ] && { echo "  'root' already exists"; continue; }
+		printf '%s' "$U" | grep -Eq '^[a-z_][a-z0-9_-]*$' ||
+			{ echo "  lowercase letters, digits, '-' and '_' only"; continue; }
+		id "$U" >/dev/null 2>&1 && { echo "  '$U' already exists"; continue; }
+		break
+	done
+	if [ -n "$U" ]; then
+		adduser -D -s /bin/sh "$U" >/dev/null 2>&1
+		grep -q '^wheel:'  /etc/group && adduser "$U" wheel  >/dev/null 2>&1
+		grep -q '^docker:' /etc/group && adduser "$U" docker >/dev/null 2>&1
+		echo
+		echo "Now choose a password for $U:"
+		passwd "$U"
+		printf 'Set a root password too (for console login and su -)? [y/N] '
+		read -r yn
+		case $yn in
+		[yY]*) echo; passwd root;;
+		esac
+		mkdir -p /var/lib/umarm
+		printf '%s\n' "$U" > /var/lib/umarm/user
+		echo
+		echo "Done. From now on you log in as $U."
+		echo "Root privileges: 'doas apk add ...', or 'doas -s' for a root shell."
+	fi
+	echo
+fi
+rm -f /host/first-run
+
+# --- log in -----------------------------------------------------------------
+U=
+[ -s /var/lib/umarm/user ] && read -r U < /var/lib/umarm/user
+if [ -n "$U" ] && id "$U" >/dev/null 2>&1 && command -v login >/dev/null 2>&1; then
+	exec login -f "$U"
+fi
+exec /bin/sh -l
+UMARM_CONSOLE_EOF
+chmod 0755 /run/umarm-console
+
+if command -v setsid >/dev/null 2>&1; then
+	setsid /bin/sh -c "exec <$CTTY >$CTTY 2>&1; exec /bin/sh /run/umarm-console"
 else
-	/bin/sh -l
+	/bin/sh /run/umarm-console
 fi
 
 sync

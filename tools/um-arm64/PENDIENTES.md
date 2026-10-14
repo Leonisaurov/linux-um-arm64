@@ -58,6 +58,40 @@ cgroup v2, crea `/etc/network/interfaces`, llena los runlevels, corre
 y `docker info`, con el daemon real. Verificado en el teléfono como
 `init=/rc-docker-init` (`RCDOCKER ok server=27.3.1`).
 
+## Cerrado: la consola no tenía tty, y no había usuario
+
+La app daba shell en el guest, pero `sh` decía `can't access tty; job control
+turned off` y `bash`, `cannot set terminal process group (-1): Not a tty`. No era
+el pty de la app: `con0=fd:0,fd:1` deja `/dev/console` como fd 0, así que
+`[ -t 0 ]` da verdadero, pero nada lo había hecho *terminal controladora* — PID 1
+arranca en una sesión sin ninguna, y `open("/dev/tty")` falla. El init hacía
+`setsid -w -c /bin/sh -l`, y el `setsid` de busybox de esta Alpine **no tiene
+`-w`**: fallaba al instante, corría el `else` y la shell quedaba sin tty. Tampoco
+hay `cttyhack`. Ahora el init abre una sesión nueva cuyo líder abre la tty de la
+consola (`setsid` + `open("/dev/tty0")`): la primera tty que abre un líder de
+sesión pasa a ser la controladora. Verificado en el teléfono: `tty` y
+`readlink /proc/self/fd/0` dan `/dev/tty0`, y `sleep 30 & jobs` lista el trabajo.
+`harness/guest/console-init` es el gate.
+
+El mismo trabajo destapó un segundo problema de permisos: como el minirootfs se
+extrae sin privilegios, `tar` aplica el umask del build (`--no-same-permissions`
+es su default para no-root) y `/etc/passwd` y `/etc/group` quedan **0600**. Root
+los lee por `CAP_DAC_OVERRIDE` y no se nota; un usuario no-root no, así que `id`
+imprime `unknown ID 1000` y `login` se porta raro. `mkrootfs.sh` y
+`mkdockerimage.sh` ahora extraen con `-p` y después hacen `chmod -R a+rX` (que
+agrega lectura y ejecución sin borrar setuid ni el sticky de `/tmp`), y devuelven
+`/etc/shadow` a 0640 y `/root` a 0700. La imagen además instala `doas` con
+`permit nopass :wheel`, porque el minirootfs no trae busybox setuid y el usuario
+no-root no tendría otra forma de llegar a root.
+
+Y en el primer arranque de la app el guest ofrece crear ese usuario: la app
+escribe `first-run` en su directorio de datos al descomprimir la imagen,
+`umarm-init` lo convierte en un asistente (usuario, contraseña, contraseña de
+root opcional), lo agrega a `wheel` y `docker`, lo recuerda en
+`/var/lib/umarm/user` y de ahí en más entra como él. El marcador lo escribe la app
+y lo borra el guest: el harness y los gates arrancan la imagen sin tocarla y como
+root.
+
 ## Sin probar (resultados nulos, con razón)
 
 - **Un host de 16 KB**: no hay uno a mano en Termux; la Raspberry Pi 5
@@ -79,7 +113,11 @@ gates en un commit de docs, `workflow_dispatch`.
 Dos filas nuevas en la matriz: `userns`/`userns-skip` (kernel `docker` y
 `default`, imagen `alpine.ext4`) y `rc-docker` (kernel `docker`, imagen
 `alpine-docker.ext4`, la que construye `mkdockerimage.sh` y que la app
-empaqueta). El job `build` construye esa imagen y la sube con el resto.
+empaqueta). Y `console` (kernel `docker`, imagen `alpine-docker.ext4`,
+`init=/console-init`) chequea lo que rompió la consola: modos de `/etc/passwd`,
+`doas` setuid, que un usuario nuevo se resuelva a sí mismo y que la tty de
+consola se pueda tomar como controladora. El job `build` construye esa imagen y
+la sube con el resto.
 
 Detalle que costó tiempo: `harness/umalpine.sh` en modo one-shot **bufferiza**
 toda la salida del guest y la imprime recién cuando el kernel sale. Si el guest

@@ -728,6 +728,20 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         fos.close();
         in.close();
         log("unpacked " + asset + " (" + (total >> 20) + " MB)\n");
+
+        /*
+         * A freshly unpacked guest image is a fresh install, and the guest's
+         * init reads this file to offer first-run setup -- it creates the
+         * non-root user and, from then on, logs in as it. It is written here
+         * and not baked into the image so that the wizard is an app boot: the
+         * image the harness and the CI gates boot has no marker, and neither
+         * does the second boot, because the guest removes it.
+         */
+        if ("rootfs.ext4".equals(outName)) {
+            File marker = new File(getFilesDir(), "first-run");
+            if (!marker.exists() && !marker.createNewFile())
+                log("cannot create the first-run marker; the guest boots as root\n");
+        }
         return out;
     }
 

@@ -32,12 +32,17 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 OUT=${1:-$PWD/alpine-docker.ext4}
 SIZE=${SIZE:-1G}
 SUDO=${SUDO:-sudo}
+# See mkrootfs.sh: tar without -p applies this umask, and a 0600 /etc/passwd is
+# invisible to root and fatal to the non-root user the wizard creates.
+umask 022
 ALPINE_BRANCH=${ALPINE_BRANCH:-v3.21}
 
 # The docker set, and a few things the gates and a shell want. docker pulls
 # containerd, runc and iptables; docker-cli-compose is the plugin, not the
 # docker-compose python script.
-PACKAGES=${PACKAGES:-"docker docker-cli-compose openrc nftables curl python3 strace"}
+# doas is what lets the non-root user the first-run wizard creates become root;
+# it is setuid, so only apk (run as root below) can install it.
+PACKAGES=${PACKAGES:-"docker docker-cli-compose openrc nftables curl python3 strace doas"}
 
 [ "$(uname -m)" = aarch64 ] || {
 	echo "mkdockerimage.sh: needs an aarch64 host (the guest's loader is aarch64)" >&2
@@ -56,7 +61,7 @@ trap cleanup EXIT
 
 fetch "$ALPINE_TARBALL"
 echo "$ALPINE_SHA256  $CACHE/$ALPINE_TARBALL" | sha256sum -c - >&2
-tar -xzf "$CACHE/$ALPINE_TARBALL" -C "$STAGE" --no-same-owner
+tar -xpzf "$CACHE/$ALPINE_TARBALL" -C "$STAGE" --no-same-owner
 
 printf 'https://dl-cdn.alpinelinux.org/alpine/%s/main\nhttps://dl-cdn.alpinelinux.org/alpine/%s/community\n' \
 	"$ALPINE_BRANCH" "$ALPINE_BRANCH" > "$STAGE/etc/apk/repositories"
@@ -96,6 +101,11 @@ if ! grep -q '^docker:' "$STAGE/etc/group"; then
 	$SUDO sh -c "echo 'docker:x:101:' >> '$STAGE/etc/group'"
 fi
 
+# Wheel may become root without a password: the first-run wizard puts the user
+# there, and the app gives one console to log in on.
+$SUDO mkdir -p "$STAGE/etc/doas.d"
+$SUDO sh -c "printf 'permit nopass :wheel\n' > '$STAGE/etc/doas.d/doas.conf'"
+
 # openrc's runlevels. umarm-init-alpine populates them at boot with rc-update,
 # but the directories have to exist for that to work -- and a gate that boots
 # with init=/rc-docker-init has no umarm-init to do it, so the docker chain is
@@ -111,11 +121,13 @@ done
 $SUDO ln -sfn /etc/init.d/docker "$STAGE/etc/runlevels/default/docker"
 
 echo "== ownership and modes ==" >&2
-# See the header: this is the userns fix, not tidiness. Directories 0755 so a
-# process that is not the owner can traverse them, files as the archive has
-# them.
+# See the header: this is the userns fix, not tidiness. a+rX makes every path
+# readable and traversable/executable without flattening setuid (doas is one),
+# setgid or the sticky bit on /tmp. /etc/shadow and /root are put back private.
 $SUDO chown -R 0:0 "$STAGE"
-$SUDO find "$STAGE" -type d -exec chmod 0755 {} +
+$SUDO chmod -R a+rX "$STAGE"
+$SUDO chmod 0640 "$STAGE/etc/shadow" "$STAGE/etc/gshadow" 2>/dev/null || true
+$SUDO chmod 0700 "$STAGE/root" 2>/dev/null || true
 
 echo "== filesystem ==" >&2
 rm -f "$OUT"

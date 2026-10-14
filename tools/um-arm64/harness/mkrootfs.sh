@@ -43,6 +43,12 @@ SUDO=${SUDO:-sudo}
 # moment one of them is updated.
 . "$HERE/pins.sh"
 
+# tar as an ordinary user applies the umask (--no-same-permissions is its
+# default for non-root), which is how /etc/passwd and executables end up 0600
+# and 0700 in these images. Ask tar for the archived modes, and fix the result
+# afterwards so it does not depend on the tar either.
+umask 022
+
 CC=${CC:-clang}
 TARGET=${TARGET:-aarch64-linux-gnu}
 
@@ -86,7 +92,7 @@ alpine)
         exit 2
     }
 
-    tar -xzf "$CACHE/$ALPINE_TARBALL" -C "$STAGE"
+    tar -xpzf "$CACHE/$ALPINE_TARBALL" -C "$STAGE" --no-same-owner
     ;;
 debian)
     command -v debootstrap >/dev/null 2>&1 || {
@@ -177,7 +183,12 @@ compile_probe "$HERE/probe/stubfork.c" stubfork
 # was reported as a kernel bug and is harness/guest/userns-init's subject.
 if [ "$DISTRO" = alpine ]; then
     $SUDO chown -R 0:0 "$STAGE"
-    $SUDO find "$STAGE" -type d -exec chmod 0755 {} +
+    # a+rX adds read everywhere, and execute where it is already meaningful (a
+    # directory, or a file that had it) without flattening setuid, setgid or the
+    # sticky bit: /tmp stays 1777, and /root is put back to 0700 below.
+    $SUDO chmod -R a+rX "$STAGE"
+    $SUDO chmod 0640 "$STAGE/etc/shadow" "$STAGE/etc/gshadow" 2>/dev/null || true
+    $SUDO chmod 0700 "$STAGE/root" 2>/dev/null || true
 fi
 
 MKE2FS=()

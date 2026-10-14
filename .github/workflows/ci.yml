@@ -892,6 +892,10 @@ jobs:
           # real dockerd; the docker-prereqs gate above checks only the kernel
           # features because no image with the daemon fit there.
           - { name: rc-docker,     kernel: docker,  ubd0: alpine-docker.ext4, init: /rc-docker-init, marker: UMARM_BOOT_OK, timeout: "900", extra: "rw" }
+          # --- the app's console: the account databases readable by a non-root
+          # user, doas for wheel, and a controlling tty. All three are invisible
+          # to root, which is why they survived until the app was used as one.
+          - { name: console,       kernel: docker,  ubd0: alpine-docker.ext4, init: /console-init,   marker: UMARM_CONSOLE_OK, timeout: "300", extra: "rw" }
           # --- the rss counters, at both page sizes, plus the negative control
           # that gives the clean runs their meaning.
           #

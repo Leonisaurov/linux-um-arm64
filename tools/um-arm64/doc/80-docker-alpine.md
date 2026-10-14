@@ -82,6 +82,13 @@ reboot y `docker --version` sigue contestando `27.3.1`.
 `openrc` no hace falta y no hay `/etc/init.d/`: `dockerd` se arranca a mano (lo
 hace el script inyectado, §3).
 
+La imagen que la app empaqueta hoy no es solo esto: `mkdockerimage.sh` también
+instala `doas` (`permit nopass :wheel`) y deja los modos que un usuario no-root
+necesita -- `/etc/passwd` 0644, `/etc/shadow` 0640 -- porque extraer el minirootfs
+sin privilegios aplica el umask y los deja 0600. En la imagen del teléfono esas
+dos cosas se corrigieron una vez desde adentro del guest. El detalle y el gate
+(`harness/guest/console-init`) están en `doc/70-android.md`, «The console».
+
 ## 2. El kernel
 
 Docker son features del kernel (namespaces, cgroup v2, overlayfs, veth, bridge,

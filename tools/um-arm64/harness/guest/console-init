@@ -1,0 +1,70 @@
+#!/bin/sh
+# The console contract the Android app depends on.
+#
+# The app gives the guest one terminal, as a non-root user. That needs three
+# things an unprivileged build gets wrong silently:
+#
+#   * /etc/passwd and /etc/group readable by anyone. tar as an ordinary user
+#     applies the build umask, so they arrive 0600 -- root never notices
+#     (CAP_DAC_OVERRIDE) and a non-root user cannot read them, after which `id`
+#     cannot put a name to a uid and `login` looks broken.
+#   * a way back to root. The image has no setuid busybox, so wheel + doas is
+#     what makes `doas apk add ...` work (umarm-init-alpine's wizard adds the
+#     user to wheel).
+#   * a controlling terminal, or job control is off and bash reports "cannot set
+#     terminal process group (-1)". See umarm-init-alpine for the mechanism.
+#
+# Booted with init=/console-init on alpine-docker.ext4. Prints UMARM_CONSOLE_OK
+# on success; any GATE_CONSOLE_FAIL line is the diagnosis.
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+export PATH
+
+fail() { echo "GATE_CONSOLE_FAIL $*"; }
+
+mount -t proc     none /proc 2>/dev/null
+mount -t sysfs    none /sys  2>/dev/null
+mount -t devtmpfs none /dev  2>/dev/null
+
+# 1. account databases are world-readable; the password hashes are not.
+for f in /etc/passwd /etc/group; do
+	[ -r "$f" ] || { fail "$f is not readable"; continue; }
+	m=$(stat -c %a "$f" 2>/dev/null)
+	case $m in 644|664) : ;; *) fail "$f is mode $m, expected 0644";; esac
+done
+case $(stat -c %a /etc/shadow 2>/dev/null) in
+600|640) : ;;
+*) fail "/etc/shadow is mode $(stat -c %a /etc/shadow 2>/dev/null), expected 0640";;
+esac
+
+# 2. wheel can become root without a password.
+[ -u /usr/bin/doas ] || fail "/usr/bin/doas is not setuid"
+grep -q '^wheel:' /etc/group || fail "there is no wheel group"
+grep -q 'wheel' /etc/doas.d/doas.conf 2>/dev/null || fail "/etc/doas.d/doas.conf does not mention wheel"
+
+# 3. a user created the way the wizard creates one can name itself, and can use
+#    doas -- i.e. the two things above actually work for that user.
+deluser ctest >/dev/null 2>&1
+rm -rf /home/ctest
+adduser -D -s /bin/sh ctest >/dev/null 2>&1 || fail "adduser ctest"
+grep -q '^wheel:' /etc/group && adduser ctest wheel >/dev/null 2>&1
+un=$(su ctest -c 'id -un' 2>&1)
+[ "$un" = ctest ] || fail "a non-root user cannot resolve its own name: '$un'"
+u0=$(su ctest -c 'doas id -u' 2>&1)
+[ "$u0" = 0 ] || fail "doas from a wheel user returned '$u0', expected 0"
+deluser ctest >/dev/null 2>&1
+rm -rf /home/ctest
+
+# 4. the console tty can be claimed as a controlling terminal, which is what the
+#    shell needs for job control and for bash to set its process group.
+TTY=
+for t in /dev/tty0 /dev/console; do [ -c "$t" ] && { TTY=$t; break; }; done
+[ -n "$TTY" ] || fail "no console character device (/dev/tty0)"
+if [ -n "$TTY" ]; then
+	setsid /bin/sh -c "exec <$TTY >$TTY 2>&1; \
+		[ \"\$(awk '{print \$7}' /proc/self/stat)\" != 0 ]" ||
+		fail "$TTY did not become the controlling terminal"
+fi
+
+echo UMARM_CONSOLE_OK
+sync
+exec /umarm-poweroff
