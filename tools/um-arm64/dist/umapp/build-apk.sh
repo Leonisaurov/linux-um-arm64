@@ -95,6 +95,41 @@ command -v javac >/dev/null || { echo "build-apk: no javac" >&2; exit 2; }
 rm -rf "$OUT"
 mkdir -p "$OUT/res" "$OUT/classes" "$OUT/lib/arm64-v8a" "$OUT/assets"
 
+# The app's identity: a digest of everything that goes into it, baked into the
+# manifest as org.umarm.recipe and written beside the APK as build/recipe. It is
+# what the update check compares with the newest umarm-* release, so an update is
+# published and offered only when something actually changed. A version code
+# bumped by hand would work too, but it is a thing to forget; a digest of the
+# inputs cannot forget.
+#
+# The binaries are hashed by content, not by path: the kernel is most of the APK,
+# and a kernel rebuilt from a changed tree has to produce a new identity.
+#
+# $HERE/AndroidManifest.xml is hashed with the __UMARM_RECIPE__ placeholder still
+# in it, which is what keeps this from depending on its own output.
+RECIPE=$(
+	{
+		printf 'manifest\n'; cat "$HERE/AndroidManifest.xml"
+		printf 'res\n';      find "$HERE/res" -type f -print0 | sort -z | xargs -0 -r cat
+		printf 'src\n';      find "$HERE/src" -type f -print0 | sort -z | xargs -0 -r cat
+		printf 'jni\n';      find "$HERE/jni" -type f -print0 | sort -z | xargs -0 -r cat
+		printf 'build\n';    cat "$HERE/build-apk.sh"
+		printf 'initramfs\n'; md5sum "$INITRAMFS"
+		for b in "${BINARIES[@]}"; do
+			src=${b%%:*}
+			printf 'bin %s\n' "$b"
+			if [ -f "$src" ]; then md5sum "$src"; else printf 'missing\n'; fi
+		done
+	} | md5sum | cut -c1-12
+)
+printf '%s\n' "$RECIPE" > "$OUT/recipe"
+echo "== recipe $RECIPE"
+
+# The checked-in manifest carries the placeholder; the digest is not known until
+# the files have been hashed, so it is substituted into a copy rather than being
+# given a resource id.
+sed "s/__UMARM_RECIPE__/$RECIPE/" "$HERE/AndroidManifest.xml" > "$OUT/AndroidManifest.xml"
+
 # aapt2 compiles a directory tree, and $OUT is wiped on every build, so the
 # checked-in resources have to be copied into it. res/xml/device_filter.xml is
 # what the manifest's @xml/device_filter points at; without this copy aapt2
@@ -151,7 +186,7 @@ echo "== compiling =="
 if ! "$BT/aapt2" link \
 	-o "$OUT/base.apk" \
 	-I "$ANDROID_JAR" \
-	--manifest "$HERE/AndroidManifest.xml" \
+	--manifest "$OUT/AndroidManifest.xml" \
 	--java "$OUT/classes" \
 	--extra-packages com.termux.view \
 	--extra-packages com.termux.terminal \

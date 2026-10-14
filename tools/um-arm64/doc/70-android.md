@@ -289,10 +289,15 @@ The guest is the same Alpine + Docker + OpenRC image `alpine-um` boots
 (`alpine-docker.ext4`), not just the small Alpine initramfs: the app installs it,
 boots `init=/umarm-init`, and the image's init brings up the network, openrc and
 dockerd before giving a login shell. The initramfs is still the fallback for a
-guest with no image yet. Settings (RAM, seccomp, net, usb) moved into a menu; the
-terminal owns the screen, with an extra-keys row
-(Ctrl/Alt/Shift/Fn/Esc/Tab/arrows/`^C`/`^D`/paste) and the USB passthrough
-unchanged.
+guest with no image yet.
+
+The terminal owns the screen. The first version put a row of buttons across the
+top and a strip of extra keys across the bottom, which is two bands of chrome to
+expose a dozen actions a run mostly does not touch; both are gone. What is left is
+one translucent handle in a corner and a drawer it opens -- RAM, seccomp, net and
+usb sit in Settings behind it. The keys moved into the drawer, which costs
+nothing: a latched `CTRL` still applies to the next character from the soft
+keyboard, and the terminal is not 40dp shorter for the rest of the session.
 
 The APK is 27 MB, and most of that is the kernel: 12 MB stripped, plus the pty
 helper and the passt binaries. `harness/ci-umapp.sh` is the
@@ -353,6 +358,40 @@ namespaces, cgroup v2, overlayfs, veth, bridge and nftables of the docker config
 It stages `16k/linux-um-docker` now, and the job compares the md5 of the
 `libuml.so` it packaged with the kernel the android job built, because
 `ci-umapp.sh` can only see "a static aarch64 ELF" and both kernels are that.
+
+### The app updates itself too
+
+The guest image was one of two things that change; the other is the app. It is a
+release as well: the `publish-apk` job attaches the signed APK to a release
+tagged `umarm-<recipe>`, and the app checks for a newer one on every start and
+offers it, with a progress dialog and an md5 check, exactly like the image.
+
+The *recipe* is the part worth explaining, because it is what replaces a version
+code. `build-apk.sh` hashes everything that goes into the APK -- the manifest,
+the resources, the sources, the jni file, the initramfs, and the md5 of each
+binary, the kernel included -- and bakes twelve hex digits of it into the manifest
+as `org.umarm.recipe` and into `build/recipe` beside the APK. The publish job
+uses it as the tag, so a run whose inputs did not change finds the tag and
+publishes nothing, and a run that changed anything publishes once. Nothing has to
+remember to bump a number, and a re-run of the same commit publishes nothing.
+
+That only works because the build is reproducible where it matters:
+`build-bionic.sh` pins `KBUILD_BUILD_TIMESTAMP` to the epoch with
+`KBUILD_BUILD_USER`/`HOST` fixed, and `mkinitramfs.sh` gzips with `-n`, so
+neither the kernel nor the initramfs carries the time of the build in its bytes.
+Without that, every run would produce a new recipe, and every phone would be told
+there was an update to a build that differs only in a timestamp.
+
+Installing it is the fiddly half. The app declares `REQUEST_INSTALL_PACKAGES` and
+the user has to allow it (Android 8's per-app "install unknown apps" switch); the
+app sends them to that screen rather than failing silently. The APK has to reach
+the installer as a `content://` URI, because since Android 7 a `file://` path out
+of an app's private storage raises `FileUriExposedException` -- and `FileProvider`
+lives in androidx.core, which is not linked here, so `ApkProvider` is that class's
+useful part written out: one name in the cache directory, read only, not
+exported, with the URI permission granted per intent. The signing key is the
+committed `debug.keystore`, which is what makes the downloaded file an update of
+the installed app rather than a second app next to it.
 
 ### The console: a controlling tty, and a first-run user
 

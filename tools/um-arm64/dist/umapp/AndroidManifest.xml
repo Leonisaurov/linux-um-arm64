@@ -21,8 +21,8 @@
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="org.umarm.debian"
-    android:versionCode="2"
-    android:versionName="0.2">
+    android:versionCode="3"
+    android:versionName="0.3">
 
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
 
@@ -37,6 +37,16 @@
       permitted". The guest boots, gets a lease, and can reach nothing.
     -->
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!--
+      To install the update it downloaded. Android has no implicit permission
+      for this even when the APK is signed by the same key: without the
+      declaration the package installer refuses the intent, and the user has to
+      find and allow "install unknown apps" for umarm in Settings. The
+      declaration asks for the capability; the user still grants it, and the app
+      sends them there rather than failing silently.
+    -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!--
       USB host mode, for handing a Realtek RTL8811AU through to the guest.
@@ -64,8 +74,7 @@
             android:exported="true"
             android:label="umarm"
             android:launchMode="singleTop"
-            android:configChanges="orientation|screenSize|keyboardHidden">
-            <intent-filter>
+            android:configChanges="orientation|screenSize|keyboardHidden">            <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
@@ -88,5 +97,26 @@
                 android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
                 android:resource="@xml/device_filter" />
         </activity>
+
+        <!--
+          The identity of this build: a digest of everything that went into it,
+          substituted by build-apk.sh. The update check compares it with the
+          newest umarm-* release, which is why nothing has to remember to bump a
+          version for an update to be noticed. See the RECIPE comment there.
+        -->
+        <meta-data
+            android:name="org.umarm.recipe"
+            android:value="__UMARM_RECIPE__" />
+
+        <!--
+          Serves the downloaded update to the package installer over
+          content://. Not exported, and the URI permission is granted per
+          intent, not held; see ApkProvider.
+        -->
+        <provider
+            android:name=".ApkProvider"
+            android:authorities="org.umarm.debian.apk"
+            android:exported="false"
+            android:grantUriPermissions="true" />
     </application>
 </manifest>

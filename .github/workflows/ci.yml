@@ -831,6 +831,67 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  # Publish the signed APK, which is what lets the app offer its own updates.
+  #
+  # The tag is the build recipe build-apk.sh baked into the manifest, so this
+  # publishes once per change to the app and does nothing at all on the runs in
+  # between -- no version code to bump, and no release per push.
+  #
+  # The keystore is the committed debug.keystore, which is what makes the
+  # published file an *update* of an installed umarm rather than a different app:
+  # Android refuses an install whose signing certificate changed, and that refusal
+  # is what the app's users would see instead of an update.
+  publish-apk:
+    name: publish the APK
+    needs: [umapp]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Download the APK
+        uses: actions/download-artifact@v4
+        with:
+          name: umarm-apk
+          path: ${{ runner.temp }}/apk
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          apk="$RUNNER_TEMP/apk/umarm.apk"
+          recipe_file="$RUNNER_TEMP/apk/build/recipe"
+          ls -la "$RUNNER_TEMP/apk"
+          [ -f "$apk" ] || { echo "no APK at $apk" >&2; exit 2; }
+          [ -s "$recipe_file" ] || { echo "no build recipe at $recipe_file" >&2; exit 2; }
+          recipe=$(tr -d '[:space:]' < "$recipe_file")
+          md5=$(md5sum "$apk" | cut -d' ' -f1)
+          size=$(stat -c%s "$apk")
+          tag="umarm-$recipe"
+          echo "recipe=$recipe md5=$md5 size=$size tag=$tag"
+
+          # The recipe is in the tag, so the release's existence *is* the answer
+          # to "has this build been published": a run that changed nothing finds
+          # the tag and stops.
+          if gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "umarm $recipe is already published; nothing to do"
+              exit 0
+          fi
+
+          printf '{"package":"org.umarm.debian","version":"%s","md5":"%s","size":%s}\n' \
+              "$recipe" "$md5" "$size" > "$RUNNER_TEMP/umarm.json"
+          cp "$apk" "$RUNNER_TEMP/umarm.apk"
+
+          gh release create "$tag" \
+              -R "$GITHUB_REPOSITORY" \
+              "$RUNNER_TEMP/umarm.apk" \
+              "$RUNNER_TEMP/umarm.json" \
+              --title "umarm $recipe" \
+              --notes-file "$RUNNER_TEMP/umarm.json"
+          echo "published $tag"
+
   # The flake loop, against the kernel that has loaded a module.
   #
   # This is the item the port's own notes rank first among the open ones and the

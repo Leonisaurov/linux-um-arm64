@@ -37,14 +37,18 @@ things Android otherwise denies it:
   (Apache 2.0, `dist/umapp/VENDORED-TERMUX.md`) -- and turns the Alpine + Docker
   + OpenRC image into a shell with `docker` in it, not just a boot log: the
   console has job control, and the first boot asks for the non-root user it will
-  log in as (`doas` takes that user to root). The image is a release asset the
-  app checks for and downloads rather than something the APK carries, so the APK
-  stays a kernel and an image fix is a release, not an app update. `doc/100-usb.md` hands a real RTL8811AU USB dongle to the guest over
+  log in as (`doas` takes that user to root). The terminal has the screen; what
+  the app can do lives in a drawer. The two things that change on their own are
+  releases rather than APK contents: the guest image and the app itself are each
+  a release asset the app checks for on start, downloads, verifies and installs,
+  so an image fix or an app fix is a release and not a rebuild-and-sideload.
+  `doc/100-usb.md` hands a real RTL8811AU USB dongle to the guest over
   USB/IP, which is how the port got `wlan0` and a scan on a phone. CI builds the
   APK (`umapp`, on an x86_64 runner because the arm64 runner images install no
   Android SDK) and checks what a device would: the signature, the aarch64 static
   binaries inside `lib/arm64-v8a/`, the terminal classes in `classes.dex`, the
-  pty shared object, the assets, the downloader, and the manifest.
+  pty shared object, the assets, the two downloaders, the installer provider,
+  and the manifest.
 
 What it is **not**: hardware, a second CPU (the guest is uniprocessor), a 32-bit
 compat layer, or an escape from the host. Every guest syscall is a host syscall

@@ -137,6 +137,38 @@ igual. Además el APK llevaba el kernel **equivocado**: `16k/linux-um` (el de
 dockerd; el job `umapp` ahora instala el docker y compara el md5 de `libuml.so`
 con el que construyó el job `android`.
 
+## Cerrado: la app se actualiza sola, y la UI es un drawer
+
+Faltaba lo simétrico a la imagen: que la app detecte que hay una versión nueva de
+sí misma y la ofrezca. El job `publish-apk` sube el APK firmado a un release
+`umarm-<receta>`, y la app lo consulta al arrancar, lo baja, verifica el md5 y se
+lo pasa al instalador. La **receta** es lo que reemplaza al version code:
+`build-apk.sh` hashea todo lo que entra en el APK (manifiesto, recursos,
+fuentes, el jni, el initramfs y el md5 de cada binario, kernel incluido), y sus
+doce dígitos hexadecimales van al manifiesto como `org.umarm.recipe` y a
+`build/recipe`. El tag del release es esa receta, así que una corrida que no
+cambió nada encuentra el tag y no publica, y una que cambió algo publica una vez;
+nadie tiene que acordarse de subir un número.
+
+Eso sólo funciona porque el build es reproducible donde importa:
+`build-bionic.sh` fija `KBUILD_BUILD_TIMESTAMP` en el epoch con
+`KBUILD_BUILD_USER`/`HOST` fijos, y `mkinitramfs.sh` comprime con `gzip -n`. Si
+no, cada corrida daría una receta nueva y cada teléfono vería una actualización
+que sólo cambia un timestamp.
+
+Instalar es la mitad incómoda: hace falta declarar `REQUEST_INSTALL_PACKAGES` y
+que el usuario lo permita (el switch por app de Android 8, al que la app manda al
+usuario en vez de fallar en silencio), y el APK tiene que llegar al instalador
+como `content://` porque desde Android 7 un `file://` del storage privado tira
+`FileUriExposedException`. `FileProvider` vive en androidx.core, que acá no está,
+así que `ApkProvider` es esa parte escrita a mano: un nombre en el cache, sólo
+lectura, no exportado, con el permiso de URI otorgado por intent.
+
+La UI, además: se fueron la barra de botones de arriba y la tira de teclas de
+abajo, y quedó un handle en una esquina con un drawer (imagen, app, teclas,
+fuente, Settings). Las teclas no se perdieron: un `CTRL` latcheado sigue
+valiendo para el próximo carácter del teclado blando.
+
 ## Sin probar (resultados nulos, con razón)
 
 - **Un host de 16 KB**: no hay uno a mano en Termux; la Raspberry Pi 5

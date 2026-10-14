@@ -16,8 +16,10 @@
 #     guest image, which is the normal case -- that the release URL the app will
 #     download one from is in the dex;
 #   * the manifest says what the app needs to say: the package name, an SDK range
-#     the binaries can run in, and the USB device filter that makes the
-#     passthrough attach prompt appear.
+#     the binaries can run in, the INTERNET and REQUEST_INSTALL_PACKAGES
+#     permissions, the USB device filter that makes the passthrough attach prompt
+#     appear, the APK provider the installer reads the update through, and a
+#     build recipe that was actually substituted;
 #
 #   ci-umapp.sh <umarm.apk>
 #
@@ -84,6 +86,25 @@ case "$native" in
 esac
 printf '%s\n' "$badging" | grep -q "uses-permission: name='android.permission.INTERNET'" \
     && ok "INTERNET is requested" || bad "INTERNET is not requested"
+
+# The app-update path is three separate things, and each fails on a device in a
+# way that reads as something else: a missing permission (the installer refuses
+# the intent and nothing says why), a missing provider (FileUriExposedException
+# on a file:// URI), and a manifest whose recipe placeholder was never
+# substituted (the update check compares the literal against a release digest
+# and offers the same update forever).
+printf '%s\n' "$badging" | grep -q "uses-permission: name='android.permission.REQUEST_INSTALL_PACKAGES'" \
+    && ok "REQUEST_INSTALL_PACKAGES is requested" || bad "REQUEST_INSTALL_PACKAGES is not requested"
+
+xmltree=$("$AAPT2" dump xmltree --file AndroidManifest.xml "$APK" 2>&1)
+recipe=$(printf '%s\n' "$xmltree" | grep -A1 '"org\.umarm\.recipe"' \
+         | sed -n 's/.*android:value([^)]*)="\([^"]*\)".*/\1/p' | head -1)
+case "$recipe" in
+""|__*) bad "the manifest has no substituted build recipe (got '$recipe')" ;;
+*)     ok "the APK carries a build recipe ($recipe)" ;;
+esac
+printf '%s\n' "$xmltree" | grep -q '"\.ApkProvider"' \
+    && ok "the manifest declares ApkProvider" || bad "the manifest does not declare ApkProvider"
 
 # --- the contents -----------------------------------------------------------
 list=$(unzip -l "$APK" 2>/dev/null)
@@ -189,6 +210,23 @@ if unzip -p "$APK" classes.dex > "$tmp/dex" 2>/dev/null; then
             ok "classes.dex carries the image-download string $s"
         else
             bad "classes.dex is missing the image-download string $s"
+        fi
+    done
+fi
+
+# The same, for the half that updates the app itself: the provider the installer
+# reads through, the authority it is reached by, the MIME type the installer
+# matches on, and the manifest key the recipe is read from.
+if unzip -p "$APK" classes.dex > "$tmp/dex" 2>/dev/null; then
+    for s in "org/umarm/debian/ApkProvider" \
+             "org.umarm.debian.apk" \
+             "org.umarm.recipe" \
+             "application/vnd.android.package-archive" \
+             "umarm-"; do
+        if grep -aq "$s" "$tmp/dex"; then
+            ok "classes.dex carries the app-update string $s"
+        else
+            bad "classes.dex is missing the app-update string $s"
         fi
     done
 fi

@@ -12,11 +12,14 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.graphics.Color;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbDeviceConnection;
 import android.hardware.usb.UsbManager;
 import android.net.LocalServerSocket;
 import android.net.LocalSocket;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -24,6 +27,7 @@ import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.system.Os;
 import android.system.OsConstants;
+import android.provider.Settings;
 import android.text.InputType;
 import android.util.Log;
 import android.util.TypedValue;
@@ -36,6 +40,7 @@ import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
@@ -127,6 +132,15 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
     private static final String IMAGE_SKIPPED = "skipped-image";
 
     /*
+     * The app's own releases, tagged with the recipe digest build-apk.sh bakes
+     * into the manifest. "Is there a newer build" is then a string comparison,
+     * and nothing has to remember to bump a version for it to be noticed.
+     */
+    private static final String APP_TAG_PREFIX = "umarm-";
+    private static final String APP_ASSET = "umarm.apk";
+    private static final String APP_SKIPPED = "skipped-app";
+
+    /*
      * Bumped when a small asset that does ship inside the APK changes. Its name
      * is fixed and it is unpacked once, so without this an update would keep the
      * first copy forever. The guest image is not one of these: it carries its own
@@ -135,10 +149,14 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
     private static final String ASSET_REVISION = "3";
 
     private TerminalView terminalView;
-    private Button startStop;
-    private Button ctrlKey;
-    private Button altKey;
-    private HorizontalScrollView keysScroll;
+    private FrameLayout root;
+    private View scrim;
+    private View drawer;
+    private boolean drawerOpen;
+    private int drawerWidth;
+    private TextView startStop;
+    private TextView ctrlKey;
+    private TextView altKey;
 
     /* Extra-key state, read by the view for the soft keyboard. */
     private boolean mCtrl, mAlt, mShift, mFn;
@@ -170,117 +188,54 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         super.onCreate(saved);
         prefs = getPreferences(MODE_PRIVATE);
 
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(Color.BLACK);
+        root = new FrameLayout(this);
+        root.setBackgroundColor(0xFF0D0D0D);
 
-        /* --- top bar: boot/stop, extra keys, settings --- */
-        LinearLayout bar = new LinearLayout(this);
-        bar.setOrientation(LinearLayout.HORIZONTAL);
-        bar.setGravity(Gravity.CENTER_VERTICAL);
-
-        startStop = new Button(this);
-        startStop.setText("Boot");
-        startStop.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                if (isGuestRunning()) stopGuest(); else boot();
-            }
-        });
-        bar.addView(startStop, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f));
-
-        Button keysButton = new Button(this);
-        keysButton.setText("Keys");
-        keysButton.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                keysScroll.setVisibility(keysScroll.getVisibility() == View.VISIBLE
-                        ? View.GONE : View.VISIBLE);
-            }
-        });
-        bar.addView(keysButton, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f));
-
-        Button settingsButton = new Button(this);
-        settingsButton.setText("Settings");
-        settingsButton.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) { showSettings(); }
-        });
-        bar.addView(settingsButton, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f));
-
-        root.addView(bar, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        /* --- the terminal --- */
         fontSizeSp = prefs.getInt("font", 12);
         terminalView = new TerminalView(this, null);
         terminalView.setTerminalViewClient(this);
         terminalView.setFocusable(true);
         terminalView.setFocusableInTouchMode(true);
         terminalView.setTextSize(fontSizeSp);
-        root.addView(terminalView, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1.0f));
+        root.addView(terminalView, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        /* --- extra keys --- */
-        keysScroll = new HorizontalScrollView(this);
-        LinearLayout keysRow = new LinearLayout(this);
-        keysRow.setOrientation(LinearLayout.HORIZONTAL);
+        /* Tapping outside the drawer closes it, the way a menu should. It sits
+         * over the terminal and under the drawer, so a tap on the panel is the
+         * panel's and a tap anywhere else is this. */
+        scrim = new View(this);
+        scrim.setBackgroundColor(0x99000000);
+        scrim.setClickable(true);
+        scrim.setVisibility(View.GONE);
+        scrim.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { closeDrawer(); }
+        });
+        root.addView(scrim, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        ctrlKey = addKey(keysRow, "CTRL", new Runnable() {
-            @Override public void run() { mCtrl = !mCtrl; paintModifiers(); }
+        TextView handle = new TextView(this);
+        handle.setText("\u2261");
+        handle.setTextSize(22);
+        handle.setTextColor(0xFFE0E0E0);
+        handle.setGravity(Gravity.CENTER);
+        handle.setBackgroundResource(R.drawable.umarm_handle_bg);
+        handle.setClickable(true);
+        handle.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { toggleDrawer(); }
         });
-        altKey = addKey(keysRow, "ALT", new Runnable() {
-            @Override public void run() { mAlt = !mAlt; paintModifiers(); }
-        });
-        addKey(keysRow, "SHIFT", new Runnable() {
-            @Override public void run() { mShift = !mShift; paintModifiers(); }
-        });
-        addKey(keysRow, "FN", new Runnable() {
-            @Override public void run() { mFn = !mFn; paintModifiers(); }
-        });
-        addKey(keysRow, "ESC", new Runnable() {
-            @Override public void run() { writeToSession("\u001b"); }
-        });
-        addKey(keysRow, "TAB", new Runnable() {
-            @Override public void run() { writeToSession("\t"); }
-        });
-        addKey(keysRow, "^C", new Runnable() {
-            @Override public void run() { writeToSession("\u0003"); }
-        });
-        addKey(keysRow, "^D", new Runnable() {
-            @Override public void run() { writeToSession("\u0004"); }
-        });
-        addKey(keysRow, "\u2191", new Runnable() {
-            @Override public void run() { writeToSession("\u001b[A"); }
-        });
-        addKey(keysRow, "\u2193", new Runnable() {
-            @Override public void run() { writeToSession("\u001b[B"); }
-        });
-        addKey(keysRow, "\u2192", new Runnable() {
-            @Override public void run() { writeToSession("\u001b[C"); }
-        });
-        addKey(keysRow, "\u2190", new Runnable() {
-            @Override public void run() { writeToSession("\u001b[D"); }
-        });
-        addKey(keysRow, "/", new Runnable() {
-            @Override public void run() { writeToSession("/"); }
-        });
-        addKey(keysRow, "-", new Runnable() {
-            @Override public void run() { writeToSession("-"); }
-        });
-        addKey(keysRow, "|", new Runnable() {
-            @Override public void run() { writeToSession("|"); }
-        });
-        addKey(keysRow, "~", new Runnable() {
-            @Override public void run() { writeToSession("~"); }
-        });
-        addKey(keysRow, "PASTE", new Runnable() {
-            @Override public void run() { paste(); }
-        });
+        FrameLayout.LayoutParams handleParams = new FrameLayout.LayoutParams(dp(44), dp(44));
+        handleParams.gravity = Gravity.TOP | Gravity.START;
+        handleParams.setMargins(dp(10), dp(10), 0, 0);
+        root.addView(handle, handleParams);
 
-        keysScroll.addView(keysRow);
-        root.addView(keysScroll, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        drawer = buildDrawer();
+        drawerWidth = Math.min(dp(300),
+                getResources().getDisplayMetrics().widthPixels - dp(56));
+        FrameLayout.LayoutParams drawerParams =
+                new FrameLayout.LayoutParams(drawerWidth, ViewGroup.LayoutParams.MATCH_PARENT);
+        drawerParams.gravity = Gravity.TOP | Gravity.START;
+        drawer.setTranslationX(-drawerWidth);
+        root.addView(drawer, drawerParams);
 
         setContentView(root);
 
@@ -290,9 +245,10 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         log("umarm -- Linux/UML on aarch64, Termux terminal, inside an Android app\n");
         log("uid " + android.os.Process.myUid() + " libdir "
                 + getApplicationInfo().nativeLibraryDir + "\n");
+        log("recipe " + recipe() + "\n");
 
         usbAttachNotice(getIntent());
-        checkImageAsync(false);
+        checkUpdatesAsync(false);
 
         showKeyboardSoon();
     }
@@ -322,26 +278,268 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         super.onDestroy();
     }
 
-    private Button addKey(LinearLayout row, String label, final Runnable action) {
-        Button b = new Button(this);
-        b.setText(label);
-        b.setAllCaps(false);
-        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        b.setMinWidth(0);
-        b.setMinimumWidth(0);
-        b.setPadding(24, 8, 24, 8);
-        b.setOnClickListener(new View.OnClickListener() {
+    private int dp(int v) {
+        return Math.round(v * getResources().getDisplayMetrics().density);
+    }
+
+    /* ------------------------------------------------------------------
+     * The drawer. A row of buttons across the top and a strip of keys across the
+     * bottom put two bands of chrome on a phone screen to expose a dozen actions
+     * a run mostly does not touch, and the terminal should have the screen. What
+     * is left is a handle in one corner and this panel, closed by default.
+     * ------------------------------------------------------------------ */
+
+    private View buildDrawer() {
+        ScrollView scroll = new ScrollView(this);
+        scroll.setBackgroundResource(R.drawable.umarm_drawer_bg);
+        scroll.setFillViewport(true);
+
+        LinearLayout v = new LinearLayout(this);
+        v.setOrientation(LinearLayout.VERTICAL);
+        /* 58dp on top clears the handle, which stays where it is. */
+        v.setPadding(dp(10), dp(58), dp(10), dp(24));
+        scroll.addView(v);
+
+        TextView title = new TextView(this);
+        title.setText("umarm");
+        title.setTextSize(24);
+        title.setTextColor(0xFFF2F2F2);
+        title.setPadding(dp(8), 0, 0, dp(2));
+        v.addView(title);
+
+        TextView sub = new TextView(this);
+        sub.setText("Alpine + Docker on a real terminal");
+        sub.setTextSize(12);
+        sub.setTextColor(0xFF8A8A8A);
+        sub.setPadding(dp(8), 0, 0, dp(10));
+        v.addView(sub);
+
+        startStop = drawerItem(v, "Boot", new View.OnClickListener() {
+            @Override public void onClick(View w) {
+                closeDrawer();
+                if (isGuestRunning()) stopGuest(); else boot();
+            }
+        });
+
+        drawerItem(v, "Keyboard", new View.OnClickListener() {
+            @Override public void onClick(View w) { closeDrawer(); showKeyboard(); }
+        });
+
+        LinearLayout fontRow = new LinearLayout(this);
+        fontRow.setOrientation(LinearLayout.HORIZONTAL);
+        v.addView(fontRow, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        drawerItemInRow(fontRow, "Font \u2212", new View.OnClickListener() {
+            @Override public void onClick(View w) {
+                fontSizeSp = Math.max(6, fontSizeSp - 1);
+                applyFont();
+            }
+        });
+        drawerItemInRow(fontRow, "Font +", new View.OnClickListener() {
+            @Override public void onClick(View w) {
+                fontSizeSp = Math.min(32, fontSizeSp + 1);
+                applyFont();
+            }
+        });
+
+        drawerSection(v, "Updates");
+        drawerItem(v, "Check for a guest image", new View.OnClickListener() {
+            @Override public void onClick(View w) { closeDrawer(); checkUpdatesAsync(true); }
+        });
+        drawerItem(v, "Check for an app update", new View.OnClickListener() {
+            @Override public void onClick(View w) { closeDrawer(); checkAppUpdateAsync(true); }
+        });
+
+        drawerSection(v, "Keys");
+        v.addView(buildKeyGrid());
+
+        drawerSection(v, "More");
+        drawerItem(v, "Settings", new View.OnClickListener() {
+            @Override public void onClick(View w) { closeDrawer(); showSettings(); }
+        });
+
+        return scroll;
+    }
+
+    private TextView newDrawerItem(String label, View.OnClickListener onClick) {
+        TextView t = new TextView(this);
+        t.setText(label);
+        t.setTextSize(15);
+        t.setTextColor(0xFFE8E8E8);
+        t.setBackgroundResource(R.drawable.umarm_item_bg);
+        t.setPadding(dp(12), dp(12), dp(12), dp(12));
+        t.setClickable(true);
+        t.setOnClickListener(onClick);
+        return t;
+    }
+
+    private TextView drawerItem(LinearLayout parent, String label, View.OnClickListener onClick) {
+        TextView t = newDrawerItem(label, onClick);
+        parent.addView(t, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        return t;
+    }
+
+    private TextView drawerItemInRow(LinearLayout row, String label,
+            View.OnClickListener onClick) {
+        TextView t = newDrawerItem(label, onClick);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        lp.setMargins(dp(2), 0, dp(2), 0);
+        row.addView(t, lp);
+        return t;
+    }
+
+    private void drawerSection(LinearLayout parent, String label) {
+        TextView t = new TextView(this);
+        t.setText(label.toUpperCase(Locale.US));
+        t.setTextSize(11);
+        t.setTextColor(0xFF7E7E7E);
+        t.setPadding(dp(12), dp(16), dp(12), dp(6));
+        parent.addView(t);
+    }
+
+    /*
+     * The keys the extra strip used to hold. They are here instead of above the
+     * keyboard: nothing is lost -- a latched CTRL still applies to the next
+     * character from the soft keyboard -- and the terminal is not permanently
+     * 40dp shorter. Tapping a key does not close the drawer, so several can be
+     * sent in a row; the modifier keys latch and show it.
+     */
+    private View buildKeyGrid() {
+        LinearLayout grid = new LinearLayout(this);
+        grid.setOrientation(LinearLayout.VERTICAL);
+
+        LinearLayout r1 = drawerRow(grid);
+        ctrlKey = drawerKey(r1, "CTRL", new Runnable() {
+            @Override public void run() { mCtrl = !mCtrl; paintModifiers(); }
+        });
+        altKey = drawerKey(r1, "ALT", new Runnable() {
+            @Override public void run() { mAlt = !mAlt; paintModifiers(); }
+        });
+        drawerKey(r1, "SHIFT", new Runnable() {
+            @Override public void run() { mShift = !mShift; paintModifiers(); }
+        });
+        drawerKey(r1, "FN", new Runnable() {
+            @Override public void run() { mFn = !mFn; paintModifiers(); }
+        });
+
+        LinearLayout r2 = drawerRow(grid);
+        drawerKey(r2, "ESC", new Runnable() {
+            @Override public void run() { writeToSession("\u001b"); }
+        });
+        drawerKey(r2, "TAB", new Runnable() {
+            @Override public void run() { writeToSession("\t"); }
+        });
+        drawerKey(r2, "^C", new Runnable() {
+            @Override public void run() { writeToSession("\u0003"); }
+        });
+        drawerKey(r2, "^D", new Runnable() {
+            @Override public void run() { writeToSession("\u0004"); }
+        });
+
+        LinearLayout r3 = drawerRow(grid);
+        drawerKey(r3, "\u2191", new Runnable() {
+            @Override public void run() { writeToSession("\u001b[A"); }
+        });
+        drawerKey(r3, "\u2193", new Runnable() {
+            @Override public void run() { writeToSession("\u001b[B"); }
+        });
+        drawerKey(r3, "\u2190", new Runnable() {
+            @Override public void run() { writeToSession("\u001b[D"); }
+        });
+        drawerKey(r3, "\u2192", new Runnable() {
+            @Override public void run() { writeToSession("\u001b[C"); }
+        });
+
+        LinearLayout r4 = drawerRow(grid);
+        drawerKey(r4, "/", new Runnable() {
+            @Override public void run() { writeToSession("/"); }
+        });
+        drawerKey(r4, "-", new Runnable() {
+            @Override public void run() { writeToSession("-"); }
+        });
+        drawerKey(r4, "|", new Runnable() {
+            @Override public void run() { writeToSession("|"); }
+        });
+        drawerKey(r4, "~", new Runnable() {
+            @Override public void run() { writeToSession("~"); }
+        });
+
+        LinearLayout r5 = drawerRow(grid);
+        drawerKey(r5, "PASTE", new Runnable() {
+            @Override public void run() { paste(); }
+        });
+        return grid;
+    }
+
+    private LinearLayout drawerRow(LinearLayout parent) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        parent.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        return row;
+    }
+
+    private TextView drawerKey(LinearLayout row, String label, final Runnable action) {
+        TextView t = new TextView(this);
+        t.setText(label);
+        t.setTextSize(12);
+        t.setTextColor(0xFFDCDCDC);
+        t.setGravity(Gravity.CENTER);
+        t.setBackgroundResource(R.drawable.umarm_key_bg);
+        t.setPadding(0, dp(10), 0, dp(10));
+        t.setClickable(true);
+        t.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) { action.run(); }
         });
-        row.addView(b);
-        return b;
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        lp.setMargins(dp(3), dp(3), dp(3), dp(3));
+        row.addView(t, lp);
+        return t;
+    }
+
+    private void toggleDrawer() {
+        if (drawerOpen) closeDrawer(); else openDrawer();
+    }
+
+    private void openDrawer() {
+        drawerOpen = true;
+        scrim.setVisibility(View.VISIBLE);
+        drawer.animate().translationX(0).setDuration(180).start();
+        /*
+         * The IME would otherwise stay up over the panel, and the terminal under
+         * it has no use for it while the drawer is open.
+         */
+        InputMethodManager imm =
+                (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+        if (imm != null) imm.hideSoftInputFromWindow(terminalView.getWindowToken(), 0);
+    }
+
+    private void closeDrawer() {
+        drawerOpen = false;
+        scrim.setVisibility(View.GONE);
+        drawer.animate().translationX(-drawerWidth).setDuration(180).start();
+        terminalView.requestFocus();
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (drawerOpen) { closeDrawer(); return; }
+        super.onBackPressed();
+    }
+
+    private void applyFont() {
+        terminalView.setTextSize(fontSizeSp);
+        prefs.edit().putInt("font", fontSizeSp).apply();
     }
 
     private void paintModifiers() {
-        ctrlKey.setBackgroundColor(mCtrl ? Color.rgb(0, 96, 0) : Color.TRANSPARENT);
-        altKey.setBackgroundColor(mAlt ? Color.rgb(0, 96, 0) : Color.TRANSPARENT);
-        /* SHIFT and FN have no dedicated button handle; their state is read by
-         * the view through readShiftKey()/readFnKey(). */
+        ctrlKey.setSelected(mCtrl);
+        altKey.setSelected(mAlt);
+        /* SHIFT and FN have no handle of their own; the view reads their state
+         * through readShiftKey()/readFnKey(). */
     }
 
     private void writeToSession(String s) {
@@ -431,18 +629,9 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         });
         v.addView(probe);
 
-        final AlertDialog[] settings = new AlertDialog[1];
-        Button image = new Button(this);
-        image.setText("Update the guest image");
-        image.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View w) {
-                if (settings[0] != null) settings[0].dismiss();
-                checkImageAsync(true);
-            }
-        });
-        v.addView(image);
-
-        settings[0] = new AlertDialog.Builder(this)
+        /* The update entries live in the drawer; this dialog is only how the
+         * guest is configured. */
+        new AlertDialog.Builder(this)
                 .setTitle("umarm")
                 .setView(v)
                 .setPositiveButton("Save", new DialogInterface.OnClickListener() {
@@ -456,8 +645,7 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
                     }
                 })
                 .setNegativeButton("Cancel", null)
-                .create();
-        settings[0].show();
+                .show();
     }
 
     /* ------------------------------------------------------------------
@@ -832,34 +1020,55 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         f.close();
     }
 
-    /** One published image: which release it is, what it should hash to, where. */
-    private static final class ImageRelease {
+    /** One published release: which one it is, what it should hash to, where. */
+    private static final class Release {
         String tag;
+        String version;          /* the tag with its prefix stripped */
         String md5 = "";
         long size;
         String url = "";
     }
 
     /*
-     * Asked once per Activity start, and from Settings, always off the main
+     * Asked once per Activity start and from the drawer, always off the main
      * thread: it is a network call, and its only product is deciding whether to
      * show a dialog.
      */
-    private void checkImageAsync(final boolean manual) {
+    private void checkUpdatesAsync(final boolean manual) {
         new Thread(new Runnable() {
-            @Override public void run() { checkImage(manual); }
-        }, "umarm-image-check").start();
+            @Override public void run() { checkUpdates(manual); }
+        }, "umarm-update-check").start();
+    }
+
+    private void checkAppUpdateAsync(final boolean manual) {
+        new Thread(new Runnable() {
+            @Override public void run() { checkAppUpdate(manual); }
+        }, "umarm-app-check").start();
+    }
+
+    /**
+     * The app first, when there is an image to run with, and the image only if
+     * the app had nothing to say. Two dialogs would otherwise land on top of each
+     * other, and an update to the app is the one worth answering first -- the
+     * image check runs again on the next start either way.
+     */
+    private void checkUpdates(boolean manual) {
+        boolean prompted = false;
+        if (guestImage() != null)
+            prompted = checkAppUpdate(manual);
+        if (!prompted)
+            checkImage(manual);
     }
 
     /**
      * Compare the installed image with the newest published one and offer the
-     * download when they differ. manual is the Settings entry, which reports the
+     * download when they differ. manual is the drawer entry, which reports the
      * outcome rather than staying quiet when there is nothing to do.
      */
     private void checkImage(final boolean manual) {
-        final ImageRelease rel;
+        final Release rel;
         try {
-            rel = fetchLatestRelease();
+            rel = fetchLatestRelease(IMAGE_TAG_PREFIX, IMAGE_ASSET);
         } catch (Exception e) {
             log("image check failed: " + e + "\n");
             if (manual) post("could not check for a new image: " + e);
@@ -877,7 +1086,7 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         }
         /*
          * "Keep" means keep this one: remembered for that version, so the
-         * question is asked once per image and the Settings entry can ask again.
+         * question is asked once per image and the drawer can ask again.
          */
         if (!manual && rel.tag.equals(prefs.getString(IMAGE_SKIPPED, "")))
             return;
@@ -886,17 +1095,52 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         });
     }
 
-    /** The newest rootfs-* release, with the manifest carried in its body. */
-    private ImageRelease fetchLatestRelease() throws IOException, JSONException {
+    /**
+     * Is there a newer build of the app itself? The identity is the recipe baked
+     * into this APK's manifest by build-apk.sh -- a digest of everything that
+     * went into it -- so the answer is right without anything being bumped by
+     * hand. Returns whether a dialog was posted, so the caller can hold the image
+     * question back.
+     */
+    private boolean checkAppUpdate(final boolean manual) {
+        final String mine = recipe();
+        final Release rel;
+        try {
+            rel = fetchLatestRelease(APP_TAG_PREFIX, APP_ASSET);
+        } catch (Exception e) {
+            log("app update check failed: " + e + "\n");
+            if (manual) post("could not check for a new app version: " + e);
+            return false;
+        }
+        if (rel == null) {
+            if (manual) post("no app release is published yet");
+            return false;
+        }
+        if (rel.version.equals(mine)) {
+            if (manual) post("the app is up to date (" + mine + ")");
+            return false;
+        }
+        if (!manual && rel.version.equals(prefs.getString(APP_SKIPPED, "")))
+            return false;
+        ui.post(new Runnable() {
+            @Override public void run() { askAppUpdate(rel); }
+        });
+        return true;
+    }
+
+    /** The newest release whose tag starts with tagPrefix and which carries asset. */
+    private Release fetchLatestRelease(String tagPrefix, String asset)
+            throws IOException, JSONException {
         JSONArray releases = new JSONArray(httpGet(RELEASES_API, 20000));
         for (int i = 0; i < releases.length(); i++) {
             JSONObject r = releases.getJSONObject(i);
             String tag = r.optString("tag_name", "");
-            if (!tag.startsWith(IMAGE_TAG_PREFIX))
+            if (!tag.startsWith(tagPrefix))
                 continue;
 
-            ImageRelease out = new ImageRelease();
+            Release out = new Release();
             out.tag = tag;
+            out.version = tag.substring(tagPrefix.length());
             try {
                 JSONObject m = new JSONObject(r.optString("body", ""));
                 out.md5 = m.optString("md5", "");
@@ -904,12 +1148,12 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
             } catch (JSONException e) {
                 /* Not the manifest: the download is still offered, the hash check
                  * is skipped, and the size comes from the HTTP response. */
-                log("release " + tag + " has no image manifest in its body\n");
+                log("release " + tag + " has no manifest in its body\n");
             }
             JSONArray assets = r.optJSONArray("assets");
             for (int j = 0; assets != null && j < assets.length(); j++) {
                 JSONObject a = assets.getJSONObject(j);
-                if (IMAGE_ASSET.equals(a.optString("name", ""))) {
+                if (asset.equals(a.optString("name", ""))) {
                     out.url = a.optString("browser_download_url", "");
                     if (out.size <= 0) out.size = a.optLong("size", 0);
                 }
@@ -920,7 +1164,7 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         return null;
     }
 
-    private void askImage(final ImageRelease rel, final boolean present) {
+    private void askImage(final Release rel, final boolean present) {
         long mb = rel.size > 0 ? rel.size >> 20 : 0;
         StringBuilder m = new StringBuilder();
         if (present) {
@@ -955,85 +1199,136 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
                 .show();
     }
 
+    private void askAppUpdate(final Release rel) {
+        final File apk = new File(getCacheDir(), ApkProvider.NAME);
+        final boolean have = apk.exists() && rel.size > 0 && apk.length() == rel.size;
+        long mb = rel.size > 0 ? rel.size >> 20 : 0;
+        StringBuilder m = new StringBuilder();
+        m.append("umarm ").append(rel.version).append(" is available");
+        if (mb > 0) m.append(" (").append(mb).append(" MB)");
+        m.append(".\n\nThe APK is signed with the same key, so Android takes it as an "
+                + "update and the guest image is left alone.");
+        new AlertDialog.Builder(this)
+                .setTitle("App update")
+                .setMessage(m.toString())
+                .setPositiveButton(have ? "Install" : "Download",
+                        new DialogInterface.OnClickListener() {
+                            @Override public void onClick(DialogInterface d, int which) {
+                                if (have) installUpdate(apk); else downloadAppUpdate(rel);
+                            }
+                        })
+                .setNegativeButton("Not now", new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface d, int which) {
+                        prefs.edit().putString(APP_SKIPPED, rel.version).apply();
+                    }
+                })
+                .show();
+    }
+
     /*
-     * Download, verify and install. The modal cannot be dismissed by tapping
-     * outside: a cancelled download is a temp file, but the install replaces a
-     * 1 GiB image, and the guest may not be running while it happens.
+     * Download and verify a release asset into the cache, and then either install
+     * it as the guest image or hand it to the package installer.
+     *
+     * The modal cannot be dismissed by tapping outside: a cancelled download is a
+     * temp file, but the image install replaces a 1 GiB filesystem and the app
+     * update restarts the app. Both run on a thread, and the thread bodies are
+     * named methods -- an anonymous class declared inside the run() of another
+     * one compiles to MainActivity$N$1 and d8 8.2 rejects that shape with an
+     * internal NullPointerException. See the note on logFile above.
      */
-    private void downloadImage(final ImageRelease rel) {
+    private static final class Progress {
+        AlertDialog dialog;
+        ProgressBar bar;
+        TextView label;
+        final boolean[] cancelled = { false };
+    }
+
+    private Progress progressDialog(String title) {
+        final Progress p = new Progress();
+        p.bar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        p.bar.setMax(100);
+        p.label = new TextView(this);
+        p.label.setText("starting ...");
+        LinearLayout v = new LinearLayout(this);
+        v.setOrientation(LinearLayout.VERTICAL);
+        v.setPadding(dp(24), dp(16), dp(24), dp(16));
+        v.addView(p.label);
+        v.addView(p.bar);
+        p.dialog = new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setView(v)
+                .setCancelable(false)
+                .create();
+        p.dialog.setButton(DialogInterface.BUTTON_NEGATIVE, "Cancel",
+                new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface d, int which) {
+                        p.cancelled[0] = true;
+                    }
+                });
+        p.dialog.show();
+        return p;
+    }
+
+    private void downloadImage(final Release rel) {
         if (isGuestRunning()) {
             toast("stop the guest first");
             return;
         }
-        final ProgressBar bar = new ProgressBar(this, null,
-                android.R.attr.progressBarStyleHorizontal);
-        bar.setMax(100);
-        final TextView label = new TextView(this);
-        label.setText("starting ...");
-        LinearLayout v = new LinearLayout(this);
-        v.setOrientation(LinearLayout.VERTICAL);
-        v.setPadding(32, 16, 32, 16);
-        v.addView(label);
-        v.addView(bar);
-        final AlertDialog dlg = new AlertDialog.Builder(this)
-                .setTitle("Guest image " + rel.tag)
-                .setView(v)
-                .setCancelable(false)
-                .create();
-        final boolean[] cancelled = { false };
-        dlg.setButton(DialogInterface.BUTTON_NEGATIVE, "Cancel",
-                new DialogInterface.OnClickListener() {
-                    @Override public void onClick(DialogInterface d, int which) {
-                        cancelled[0] = true;
-                    }
-                });
-        dlg.show();
-
+        final Progress p = progressDialog("Guest image " + rel.tag);
         new Thread(new Runnable() {
-            @Override public void run() {
-                runDownload(rel, bar, label, cancelled, dlg);
-            }
+            @Override public void run() { runImageDownload(rel, p); }
         }, "umarm-image-download").start();
     }
 
-    /*
-     * The thread body is a named method on purpose. An anonymous class declared
-     * inside the run() of another one is compiled to MainActivity$N$1, and d8
-     * 8.2 rejects that shape with an internal NullPointerException -- the note on
-     * logFile above is the same rule. Anonymous classes are only created in
-     * ordinary methods here.
-     */
-    private void runDownload(ImageRelease rel, ProgressBar bar, TextView label,
-            boolean[] cancelled, AlertDialog dlg) {
+    private void runImageDownload(Release rel, Progress p) {
+        String err = null;
+        String ok = "guest image " + rel.tag + " installed -- Boot to use it";
+        try {
+            File gz = downloadToCache(rel, IMAGE_ASSET, p);
+            if (gz == null) ok = null;                 /* cancelled */
+            else installImage(gz, rel.tag, p);
+        } catch (Exception e) {
+            err = e.toString();
+            ok = null;
+        }
+        finishDownload(p, ok, err);
+    }
+
+    private void downloadAppUpdate(final Release rel) {
+        final Progress p = progressDialog("umarm " + rel.version);
+        new Thread(new Runnable() {
+            @Override public void run() { runAppDownload(rel, p); }
+        }, "umarm-app-download").start();
+    }
+
+    private void runAppDownload(Release rel, Progress p) {
+        File apk = null;
         String err = null;
         try {
-            downloadAndInstall(rel, bar, label, cancelled);
+            apk = downloadToCache(rel, ApkProvider.NAME, p);
         } catch (Exception e) {
             err = e.toString();
         }
-        finishDownload(dlg, rel, cancelled, err);
+        finishDownload(p, null, err);
+        if (apk != null && !p.cancelled[0])
+            installUpdateFromThread(apk);
     }
 
-    private void finishDownload(final AlertDialog dlg, final ImageRelease rel,
-            final boolean[] cancelled, final String err) {
+    /* Main-thread hop in a named method, for the same d8 reason as above. */
+    private void installUpdateFromThread(final File apk) {
         ui.post(new Runnable() {
-            @Override public void run() {
-                dlg.dismiss();
-                if (err != null) {
-                    log("image download failed: " + err + "\n");
-                    toast("the image could not be installed: " + err);
-                } else if (cancelled[0]) {
-                    toast("cancelled");
-                } else {
-                    toast("guest image " + rel.tag + " installed -- Boot to use it");
-                }
-            }
+            @Override public void run() { installUpdate(apk); }
         });
     }
 
-    private void downloadAndInstall(ImageRelease rel, ProgressBar bar, TextView label,
-            boolean[] cancelled) throws IOException {
-        File part = new File(getCacheDir(), IMAGE_ASSET + ".part");
+    /**
+     * Download a release asset into the cache, repainting the dialog at most once
+     * per megabyte, and check it against the md5 the manifest advertised. Returns
+     * the file, or null when Cancel was pressed.
+     */
+    private File downloadToCache(Release rel, String name, Progress p) throws IOException {
+        File out = new File(getCacheDir(), name);
+        File part = new File(getCacheDir(), name + ".part");
         MessageDigest digest;
         try {
             digest = MessageDigest.getInstance("MD5");
@@ -1055,28 +1350,28 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
             if (total <= 0) total = rel.size;
 
             InputStream in = c.getInputStream();
-            FileOutputStream out = new FileOutputStream(part);
+            FileOutputStream fos = new FileOutputStream(part);
             byte[] buf = new byte[1 << 16];
             long done = 0, last = 0;
             int n;
             while ((n = in.read(buf)) > 0) {
-                if (cancelled[0]) {
+                if (p.cancelled[0]) {
                     in.close();
-                    out.close();
+                    fos.close();
                     part.delete();
-                    return;
+                    return null;
                 }
-                out.write(buf, 0, n);
+                fos.write(buf, 0, n);
                 if (digest != null) digest.update(buf, 0, n);
                 done += n;
-                if (done - last >= (1 << 20)) {
+                if (done - last >= (1L << 20)) {
                     last = done;
-                    progress(bar, label, "downloading", done, total);
+                    progress(p, "downloading", done, total);
                 }
             }
-            out.close();
+            fos.close();
             in.close();
-            progress(bar, label, "verifying", done, total);
+            progress(p, "verifying", done, total);
 
             if (rel.md5.length() > 0 && digest != null) {
                 String got = hex(digest.digest());
@@ -1084,28 +1379,47 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
                     throw new IOException("md5 mismatch (expected " + rel.md5
                             + ", got " + got + ")");
             }
-            installImage(part, rel.tag, bar, label);
+            if (out.exists() && !out.delete())
+                throw new IOException("cannot replace " + out);
+            if (!part.renameTo(out))
+                throw new IOException("cannot rename " + part);
+            return out;
         } finally {
             c.disconnect();
         }
     }
 
+    private void finishDownload(final Progress p, final String ok, final String err) {
+        ui.post(new Runnable() {
+            @Override public void run() {
+                p.dialog.dismiss();
+                if (err != null) {
+                    log("download failed: " + err + "\n");
+                    toast("could not install it: " + err);
+                } else if (p.cancelled[0]) {
+                    toast("cancelled");
+                } else if (ok != null) {
+                    toast(ok);
+                }
+            }
+        });
+    }
+
     /** Unpack the downloaded archive onto the image the guest boots. */
-    private void installImage(File gz, String tag, ProgressBar bar, TextView label)
-            throws IOException {
+    private void installImage(File gz, String tag, Progress p) throws IOException {
         File out = new File(getFilesDir(), IMAGE_NAME);
         File neu = new File(getFilesDir(), IMAGE_NAME + ".new");
 
         /*
          * The bar's maximum comes from the gzip trailer, not from the download.
          * The extractor turns a 110 MB archive into a 1 GiB image and never says
-         * how much is left, so progress() had no total to divide by and left the
-         * bar wherever the download had put it -- full. ISIZE is the
-         * uncompressed size, and a single-member gzip (what `gzip -c` writes,
-         * and what the release carries) puts it in the last four bytes.
+         * how much is left, so a bar driven only by the download would sit
+         * wherever the download left it -- full. ISIZE is the uncompressed size,
+         * and a single-member gzip (what `gzip -c` writes, and what the release
+         * carries) puts it in the last four bytes.
          */
         long raw = gzipIsize(gz);
-        progress(bar, label, "unpacking", 0, raw);
+        progress(p, "unpacking", 0, raw);
         InputStream in = new GZIPInputStream(new FileInputStream(gz), 65536);
         FileOutputStream fos = new FileOutputStream(neu);
         byte[] buf = new byte[1 << 16];
@@ -1117,12 +1431,12 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
             /* Repaint every 8 MB: 1 GiB is 128 steps, and not 16 000 posts. */
             if (total - last >= (8L << 20)) {
                 last = total;
-                progress(bar, label, "unpacking", total, raw);
+                progress(p, "unpacking", total, raw);
             }
         }
         fos.close();
         in.close();
-        progress(bar, label, "unpacking", total, raw);
+        progress(p, "unpacking", total, raw);
 
         if (out.exists() && !out.delete())
             throw new IOException("cannot replace " + out);
@@ -1145,20 +1459,79 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         log("installed the guest image " + tag + " (" + (total >> 20) + " MB)\n");
     }
 
+    /**
+     * Hand the downloaded APK to the package installer.
+     *
+     * Two things have to be true first, and Android reports neither of them in
+     * the install screen: the app has to be allowed to request installs at all
+     * (REQUEST_INSTALL_PACKAGES, a per-app switch in Settings since Android 8),
+     * and the file has to reach the installer through a content:// URI, because a
+     * file:// path out of an app's private storage raises FileUriExposedException.
+     * ApkProvider is the second of those; this is the first.
+     */
+    private void installUpdate(File apk) {
+        if (Build.VERSION.SDK_INT >= 26 && !getPackageManager().canRequestPackageInstalls()) {
+            new AlertDialog.Builder(this)
+                    .setTitle("Allow umarm to install updates")
+                    .setMessage("Android needs this switch on before the app can install a "
+                            + "downloaded update. The APK is already downloaded; come back "
+                            + "and check for updates again.")
+                    .setPositiveButton("Open settings", new DialogInterface.OnClickListener() {
+                        @Override public void onClick(DialogInterface d, int which) {
+                            try {
+                                startActivity(new Intent(
+                                        Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                        Uri.parse("package:" + getPackageName())));
+                            } catch (Exception e) {
+                                toast("no settings screen for this: " + e);
+                            }
+                        }
+                    })
+                    .setNegativeButton("Cancel", null)
+                    .show();
+            return;
+        }
+        Intent i = new Intent(Intent.ACTION_VIEW);
+        i.setDataAndType(ApkProvider.uri(), "application/vnd.android.package-archive");
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try {
+            startActivity(i);
+        } catch (Exception e) {
+            log("could not start the installer: " + e + "\n");
+            toast("could not start the installer: " + e);
+        }
+    }
+
+    /** The build identity build-apk.sh baked into the manifest. */
+    private String recipe() {
+        try {
+            ApplicationInfo ai = getPackageManager()
+                    .getApplicationInfo(getPackageName(), PackageManager.GET_META_DATA);
+            if (ai == null || ai.metaData == null) return "";
+            String r = ai.metaData.getString("org.umarm.recipe", "");
+            /* An unsubstituted placeholder means the manifest never went through
+             * build-apk.sh; "unknown" is better than comparing the literal with a
+             * release digest and offering an update forever. */
+            return r == null || r.startsWith("__") ? "" : r;
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
     /** Repaint the download dialog, at most once per megabyte. */
-    private void progress(final ProgressBar bar, final TextView label, final String what,
+    private void progress(final Progress p, final String what,
             final long done, final long total) {
         ui.post(new Runnable() {
             @Override public void run() {
                 if (total > 0) {
-                    if (bar.isIndeterminate()) bar.setIndeterminate(false);
-                    bar.setProgress((int) (done * 100 / total));
-                } else if (!bar.isIndeterminate()) {
+                    if (p.bar.isIndeterminate()) p.bar.setIndeterminate(false);
+                    p.bar.setProgress((int) (done * 100 / total));
+                } else if (!p.bar.isIndeterminate()) {
                     /* No total to divide by: an animated bar and the megabyte
                      * count, rather than a full bar that means nothing. */
-                    bar.setIndeterminate(true);
+                    p.bar.setIndeterminate(true);
                 }
-                label.setText(what + "  " + (done >> 20)
+                p.label.setText(what + "  " + (done >> 20)
                         + (total > 0 ? " / " + (total >> 20) : "") + " MB");
             }
         });

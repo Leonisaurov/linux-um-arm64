@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The drawer panel: a dark slab with a rounded outer edge, the way it reads as a
+  panel laid over the terminal rather than a second screen.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="#F21A1A1A" />
+    <corners
+        android:topRightRadius="16dp"
+        android:bottomRightRadius="16dp" />
+    <stroke
+        android:width="1dp"
+        android:color="#2E2E2E" />
+</shape>
