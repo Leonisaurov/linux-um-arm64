@@ -375,12 +375,39 @@ uses it as the tag, so a run whose inputs did not change finds the tag and
 publishes nothing, and a run that changed anything publishes once. Nothing has to
 remember to bump a number, and a re-run of the same commit publishes nothing.
 
-That only works because the build is reproducible where it matters:
-`build-bionic.sh` pins `KBUILD_BUILD_TIMESTAMP` to the epoch with
-`KBUILD_BUILD_USER`/`HOST` fixed, and `mkinitramfs.sh` gzips with `-n`, so
-neither the kernel nor the initramfs carries the time of the build in its bytes.
-Without that, every run would produce a new recipe, and every phone would be told
-there was an update to a build that differs only in a timestamp.
+That only works if the build is reproducible where it matters, and two things
+were not. Both were found by building the same commit twice and comparing, and by
+comparing two commits whose kernel sources are identical:
+
+  * `mkinitramfs.sh` wrote `int(time.time())` into every cpio header, so the
+    archive differed on every run. The `gzip -9n` at the end of that script was
+    already there for exactly this reason; the cpio writer was the half that was
+    missed. The mtime is a constant now, and two builds three seconds apart hash
+    the same.
+
+  * `CONFIG_LOCALVERSION_AUTO`, which `init/Kconfig` defaults to `y`, appends
+    `git describe` of the repository HEAD through `scripts/setlocalversion`. This
+    repository *is* the kernel, so every commit -- including one that touches
+    nothing the build reads -- gave the kernel different bytes: the same source
+    built at two commits produced `4f665eba…` and `66dddf9f…`. `build-bionic.sh`
+    turns the symbol off and sets a fixed suffix, so the shipped kernel's bytes
+    track the kernel's source. The glibc kernels keep the automatic suffix:
+    nothing ships them, and which commit a boot gate ran is worth having in its
+    log.
+
+`KBUILD_BUILD_TIMESTAMP` was already pinned to the epoch with the user and host
+fixed, so the time of the build was never the problem; the repository's identity
+and the archive's were. With both fixed, a commit that touches only `ci.yml`
+reproduces the same recipe and the same kernel md5, and the publish job finds the
+tag it already made.
+
+One more thing the update check cannot take from the API: the order of its
+releases. The documentation says `GET /releases` is sorted by `created_at`,
+descending; what it returned was `umarm-ea5ba1424a6d` (13:50) and
+`umarm-a83c8b925c82` (13:29) *above* `umarm-7c974e3214bc` (14:07), which is
+tag-name order. Taking the first match would have offered an installed app a
+*downgrade*, and gone on offering it. `fetchLatestRelease()` takes the maximum
+`published_at` instead, comparing the ISO timestamps as strings.
 
 Installing it is the fiddly half. The app declares `REQUEST_INSTALL_PACKAGES` and
 the user has to allow it (Android 8's per-app "install unknown apps" switch); the

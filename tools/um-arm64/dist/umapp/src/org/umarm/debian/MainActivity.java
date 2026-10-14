@@ -1024,6 +1024,7 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
     private static final class Release {
         String tag;
         String version;          /* the tag with its prefix stripped */
+        String published = "";   /* published_at, or created_at if there is none */
         String md5 = "";
         long size;
         String url = "";
@@ -1128,10 +1129,23 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         return true;
     }
 
-    /** The newest release whose tag starts with tagPrefix and which carries asset. */
+    /**
+     * The newest release whose tag starts with tagPrefix and which carries asset.
+     *
+     * "Newest" is computed from published_at rather than taken from the order the
+     * API returns, because that order is not the documented one. The docs say
+     * "sorted by created_at, descending" and what GitHub actually returned was
+     * umarm-ea5ba1424a6d (13:50) and umarm-a83c8b925c82 (13:29) *above*
+     * umarm-7c974e3214bc (14:07) -- tag-name order. Trusting it would have offered
+     * an installed app a downgrade, and gone on offering it.
+     *
+     * The timestamps are ISO 8601 in UTC with a fixed width, so comparing them as
+     * strings is comparing them as dates.
+     */
     private Release fetchLatestRelease(String tagPrefix, String asset)
             throws IOException, JSONException {
         JSONArray releases = new JSONArray(httpGet(RELEASES_API, 20000));
+        Release best = null;
         for (int i = 0; i < releases.length(); i++) {
             JSONObject r = releases.getJSONObject(i);
             String tag = r.optString("tag_name", "");
@@ -1141,6 +1155,9 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
             Release out = new Release();
             out.tag = tag;
             out.version = tag.substring(tagPrefix.length());
+            out.published = r.optString("published_at", "");
+            if (out.published.length() == 0)
+                out.published = r.optString("created_at", "");
             try {
                 JSONObject m = new JSONObject(r.optString("body", ""));
                 out.md5 = m.optString("md5", "");
@@ -1158,10 +1175,11 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
                     if (out.size <= 0) out.size = a.optLong("size", 0);
                 }
             }
-            if (out.url.length() > 0)
-                return out;
+            if (out.url.length() > 0
+                    && (best == null || out.published.compareTo(best.published) > 0))
+                best = out;
         }
-        return null;
+        return best;
     }
 
     private void askImage(final Release rel, final boolean present) {

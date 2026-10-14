@@ -150,11 +150,36 @@ doce dígitos hexadecimales van al manifiesto como `org.umarm.recipe` y a
 cambió nada encuentra el tag y no publica, y una que cambió algo publica una vez;
 nadie tiene que acordarse de subir un número.
 
-Eso sólo funciona porque el build es reproducible donde importa:
-`build-bionic.sh` fija `KBUILD_BUILD_TIMESTAMP` en el epoch con
-`KBUILD_BUILD_USER`/`HOST` fijos, y `mkinitramfs.sh` comprime con `gzip -n`. Si
-no, cada corrida daría una receta nueva y cada teléfono vería una actualización
-que sólo cambia un timestamp.
+Eso sólo funciona porque el build es reproducible donde importa, y dos cosas no
+lo eran. Las dos salieron de construir el mismo commit dos veces y comparar, y de
+comparar dos commits con el código del kernel idéntico:
+
+- `mkinitramfs.sh` escribía `int(time.time())` en cada cabecera del cpio, así que
+  el archivo cambiaba en cada corrida. El `gzip -9n` del final ya estaba por esa
+  misma razón; el escritor de cpio era la mitad que faltaba. El mtime es constante
+  ahora, y dos builds separados por segundos dan el mismo hash.
+- `CONFIG_LOCALVERSION_AUTO`, que `init/Kconfig` trae en `y`, agrega el
+  `git describe` del HEAD del repo vía `scripts/setlocalversion`. Este repositorio
+  *es* el kernel, así que cada commit —incluso uno que no toca nada que el build
+  lea— daba bytes distintos: el mismo código en dos commits dio `4f665eba…` y
+  `66dddf9f…`. `build-bionic.sh` apaga el símbolo y fija un sufijo, así que los
+  bytes del kernel que se envía siguen al código del kernel. Los glibc conservan
+  el sufijo automático: no se envía ninguno, y saber qué commit corrió un gate
+  vale tenerlo en su log.
+
+`KBUILD_BUILD_TIMESTAMP` ya estaba fijo en el epoch con user y host fijos, así que
+el tiempo del build nunca fue el problema: lo eran la identidad del repositorio y
+la del archivo. Con los dos arreglados, un commit que sólo toca `ci.yml` reproduce
+la misma receta y el mismo md5 de kernel, y el job de publicación encuentra el tag
+que ya hizo.
+
+Y algo que la comprobación de actualizaciones no puede tomar de la API: el orden
+de sus releases. La documentación dice que `GET /releases` viene ordenado por
+`created_at` descendente; lo que devolvió fue `umarm-ea5ba1424a6d` (13:50) y
+`umarm-a83c8b925c82` (13:29) *arriba* de `umarm-7c974e3214bc` (14:07), que es
+orden por nombre de tag. Tomar el primero le habría ofrecido a la app instalada un
+*downgrade*, y se lo habría seguido ofreciendo. `fetchLatestRelease()` toma el
+`published_at` máximo comparando los timestamps ISO como texto.
 
 Instalar es la mitad incómoda: hace falta declarar `REQUEST_INSTALL_PACKAGES` y
 que el usuario lo permita (el switch por app de Android 8, al que la app manda al
