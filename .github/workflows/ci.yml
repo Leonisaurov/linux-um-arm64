@@ -1290,3 +1290,7 @@ jobs:
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+# A comment, deliberately: this file is not an input to the APK or to its
+# recipe, so a commit that touches only this must not move either one. It exists
+# to check that the bionic kernel stopped carrying the repository HEAD.
