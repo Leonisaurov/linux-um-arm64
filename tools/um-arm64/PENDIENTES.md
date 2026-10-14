@@ -101,11 +101,15 @@ un arreglo de la imagen sólo llegaba al teléfono con una actualización de la 
 Ahora la imagen es un asset de un release de GitHub. Cuando cambia, el job
 `publish` (sólo en `push` a `main`) crea un release
 `rootfs-<fecha>-<run>-<attempt>` con `rootfs.ext4.gz` y `rootfs.json`, y no
-publica nada si los bytes son los que ya están.
+publica nada si la receta del guest es la que ya está. La versión sale de la
+receta y no de los bytes a propósito: el ext4 no es reproducible (`mke2fs` escribe
+un UUID al azar, `install` estampa la hora), así que un md5 cambiaría en cada
+corrida y le preguntaría a cada app instalada en cada push a `main`.
 
-El *body* del release es el manifiesto (`{"version":…,"md5":…,"size":…}`), así
-que una sola consulta a la API de releases le dice a la app cuál es la última
-imagen y con qué hash tiene que coincidir. En cada arranque la app consulta,
+El *body* del release es el manifiesto
+(`{"version":…,"md5":…,"size":…,"recipe":…}`), así que una sola consulta a la
+API de releases le dice a la app cuál es la última imagen y con qué hash tiene
+que coincidir. En cada arranque la app consulta,
 compara el tag con el que guardó en `rootfs.version` y ofrece bajar sólo si
 difieren. "Keep" recuerda esa versión, así que la pregunta se hace una vez por
 imagen, y en Settings hay una entrada que vuelve a preguntar a propósito. La
@@ -115,6 +119,23 @@ el guest está booteando nunca quede a medio escribir. Imagen nueva es instalaci
 nueva, así que se escribe el mismo marcador `first-run` y corre el asistente. Un
 build puede seguir metiendo una imagen con `ROOTFS_GZ` para correr sin red, y
 `ci-umapp.sh` acepta las dos formas.
+
+Aparte de la imagen, el kernel. El APK quedaba en 153 MB porque `libuml.so` era
+el kernel biónico **sin strip**, y 131 de sus 143 MB son
+`.debug_info`/`.debug_loc`/`.debug_line` que ningún teléfono lee. El job `android`
+les corre `llvm-strip --strip-debug` y `build-apk.sh` strippea la copia staged:
+143 MB → 12 MB y el APK → **27 MB**. Verificado en el teléfono: el kernel
+strippado (md5 `4e275e73…`) arranca el guest y pasa el gate `console` con
+`kernel_bugs=0`, y es byte por byte el `libuml.so` que quedó en el APK.
+
+El kernel no puede venir de un release como la imagen. El dominio `untrusted_app`
+niega `execute` sobre los archivos de datos de la app — la misma regla W^X que
+obliga a que `stub_exe` salga de `nativeLibraryDir` en vez de un memfd —, así que
+un kernel bajado a `files/` se podría descargar y verificar y el exec fallaría
+igual. Además el APK llevaba el kernel **equivocado**: `16k/linux-um` (el de
+`arm64_defconfig`) en vez de `16k/linux-um-docker`, que es el que necesita
+dockerd; el job `umapp` ahora instala el docker y compara el md5 de `libuml.so`
+con el que construyó el job `android`.
 
 ## Sin probar (resultados nulos, con razón)
 

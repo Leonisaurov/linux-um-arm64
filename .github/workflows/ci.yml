@@ -297,6 +297,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download the image
         uses: actions/download-artifact@v4
         with:
@@ -314,26 +317,42 @@ jobs:
           size=$(stat -c%s "$gz")
           echo "image md5=$md5 size=$size"
 
-          # The newest rootfs-* release and the md5 its body advertises. `gh api`
-          # lists releases newest first, so the first match is the current one.
+          # The published version is the image *recipe*, not its bytes. The ext4
+          # is not reproducible -- mke2fs writes a random UUID, install(1) stamps
+          # the current time, and apk's index moves -- so its md5 differs on every
+          # run, and keying off that would publish a new release, and prompt every
+          # installed app, on every push to main. What a person cares about is a
+          # change to the guest: the two builders, the package list inside
+          # mkdockerimage.sh, and the guest scripts they install.
+          recipe=$(for f in tools/um-arm64/harness/mkdockerimage.sh \
+                             tools/um-arm64/harness/mkrootfs.sh \
+                             tools/um-arm64/harness/guest/*; do
+                       printf '%s\n' "$f"; cat "$f"
+                   done | md5sum | cut -d' ' -f1)
+          echo "image recipe=$recipe"
+
+          # The newest rootfs-* release and the recipe it was published for. `gh
+          # api` lists releases newest first, so the first match is the current
+          # one. A release published before this field existed has no recipe and
+          # is republished once.
           prev=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=20" \
                    --jq '[.[] | select(.tag_name | startswith("rootfs-"))] | .[0] // empty')
-          prev_md5=""
+          prev_recipe=""
           if [ -n "$prev" ]; then
-              prev_md5=$(printf '%s' "$prev" | jq -r '.body // empty' \
-                           | jq -r '.md5 // empty' 2>/dev/null || true)
+              prev_recipe=$(printf '%s' "$prev" | jq -r '.body // empty' \
+                              | jq -r '.recipe // empty' 2>/dev/null || true)
           fi
-          if [ -n "$prev_md5" ] && [ "$prev_md5" = "$md5" ]; then
-              echo "the published image is already these bytes; nothing to publish"
+          if [ -n "$prev_recipe" ] && [ "$prev_recipe" = "$recipe" ]; then
+              echo "the guest recipe is unchanged; nothing to publish"
               exit 0
           fi
 
           # Run attempt in the tag so a re-run cannot collide with the release its
-          # first attempt left behind; the md5 check above is what keeps re-runs
-          # from publishing twice when the first one succeeded.
+          # first attempt left behind; the recipe check above is what keeps a
+          # re-run from publishing twice when the first one succeeded.
           tag="rootfs-$(date -u +%Y%m%d)-$GITHUB_RUN_NUMBER-$GITHUB_RUN_ATTEMPT"
-          printf '{"version":"%s","md5":"%s","size":%s,"image":"rootfs.ext4.gz"}\n' \
-              "$tag" "$md5" "$size" > "$RUNNER_TEMP/rootfs.json"
+          printf '{"version":"%s","md5":"%s","size":%s,"recipe":"%s","image":"rootfs.ext4.gz"}\n' \
+              "$tag" "$md5" "$size" "$recipe" > "$RUNNER_TEMP/rootfs.json"
           cp "$gz" "$RUNNER_TEMP/rootfs.ext4.gz"
 
           # The body *is* the manifest, and the asset of the same name is the
@@ -535,6 +554,35 @@ jobs:
           export EXTRA_CONFIG=tools/um-arm64/config/docker.config
           bash tools/um-arm64/harness/build-bionic.sh
 
+      # Both bionic kernels are stripped once they exist: one of them becomes
+      # libuml.so in the APK, and both are what a phone runs. Unstripped they
+      # are 143 MB each and 131 MB of that is .debug_info/.debug_loc -- a symbol
+      # table no phone reads. Stripping takes each to about 12 MB, which is the
+      # difference between a 153 MB APK and a 22 MB one, and it shrinks the
+      # artifact every other job downloads by the same amount.
+      #
+      # --strip-debug, not --strip-all: it removes the debug sections and keeps
+      # .symtab, which is how a kernel is normally shipped. The glibc kernels in
+      # um-arm64-kernels are left alone on purpose; nothing ships them and their
+      # debug info is what makes a gate that fails readably.
+      - name: Strip the bionic kernels
+        run: |
+          set -euo pipefail
+          STRIP="$NDK_HOME/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          [ -x "$STRIP" ] || { echo "no llvm-strip at $STRIP" >&2; exit 2; }
+          for k in "$RUNNER_TEMP/android/16k/linux-um" \
+                   "$RUNNER_TEMP/android/16k/linux-um-docker" \
+                   "$RUNNER_TEMP/android/4k/linux-um"; do
+            [ -f "$k" ] || { echo "no kernel at $k" >&2; exit 2; }
+            before=$(stat -c%s "$k")
+            "$STRIP" --strip-debug "$k"
+            after=$(stat -c%s "$k")
+            printf '   %-18s %s -> %s bytes\n' \
+              "$(basename "$(dirname "$k")")/$(basename "$k")" "$before" "$after"
+            [ "$after" -lt "$before" ] || { echo "      $k did not shrink" >&2; exit 1; }
+          done
+          file "$RUNNER_TEMP/android/16k/linux-um-docker"
+
       - name: Build the bionic networking helpers
         run: |
           set -euo pipefail
@@ -729,7 +777,12 @@ jobs:
           # taught about the artifact layout.
           export ROOT="$RUNNER_TEMP/umapp-root"
           mkdir -p "$ROOT/artifacts" "$ROOT/dist/umdebian"
-          install -m 0755 "$RUNNER_TEMP/artifacts/um-arm64-android/16k/linux-um"  "$ROOT/artifacts/linux-bionic"
+          # The docker kernel, not the default one: the image this app installs
+          # is Alpine + Docker + OpenRC, and docker needs the namespaces,
+          # cgroup v2, overlayfs, veth, bridge and nftables that arm64_defconfig
+          # leaves out. Booting the default kernel would bring up the guest and
+          # then fail the one thing the guest is for.
+          install -m 0755 "$RUNNER_TEMP/artifacts/um-arm64-android/16k/linux-um-docker"  "$ROOT/artifacts/linux-bionic"
           install -m 0755 "$RUNNER_TEMP/artifacts/um-arm64-android/16k/stub_exe" "$ROOT/artifacts/stub_exe_bionic"
           install -m 0755 "$RUNNER_TEMP/artifacts/um-arm64-android/16k/umnet"    "$ROOT/dist/umdebian/umnet"
           install -m 0755 "$RUNNER_TEMP/artifacts/um-arm64-android/16k/passt"    "$ROOT/dist/umdebian/passt"
@@ -751,7 +804,21 @@ jobs:
           bash tools/um-arm64/dist/umapp/build-apk.sh
 
       - name: Verify the APK
-        run: bash tools/um-arm64/harness/ci-umapp.sh tools/um-arm64/dist/umapp/umarm.apk
+        run: |
+          set -euo pipefail
+          bash tools/um-arm64/harness/ci-umapp.sh tools/um-arm64/dist/umapp/umarm.apk
+          # ci-umapp.sh can tell that libuml.so is a static aarch64 ELF; it cannot
+          # tell the docker kernel from the default one, and the app booted the
+          # default for a while. The image it installs is Alpine + Docker, whose
+          # daemon needs namespaces, cgroup v2, overlayfs, veth and nftables that
+          # arm64_defconfig leaves out, so the kernel the APK carries is compared
+          # with the one the android job built for it, byte for byte.
+          tmp=$(mktemp -d)
+          unzip -p tools/um-arm64/dist/umapp/umarm.apk lib/arm64-v8a/libuml.so > "$tmp/libuml.so"
+          got=$(md5sum "$tmp/libuml.so" | cut -d' ' -f1)
+          want=$(md5sum "$RUNNER_TEMP/artifacts/um-arm64-android/16k/linux-um-docker" | cut -d' ' -f1)
+          echo "libuml.so md5=$got  linux-um-docker md5=$want"
+          [ "$got" = "$want" ] || { echo "libuml.so is not the docker kernel" >&2; exit 1; }
 
       - name: Upload the APK
         if: always()

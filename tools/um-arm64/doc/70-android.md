@@ -294,10 +294,11 @@ terminal owns the screen, with an extra-keys row
 (Ctrl/Alt/Shift/Fn/Esc/Tab/arrows/`^C`/`^D`/paste) and the USB passthrough
 unchanged.
 
-The APK is 153 MB and almost all of it is the kernel, which is the point of the
-app; `harness/ci-umapp.sh` is the signature/manifest/contents check and asserts
-the terminal classes in `classes.dex`, the pty entry point in `libtermux.so`, and
-the strings the image downloader needs.
+The APK is 27 MB, and most of that is the kernel: 12 MB stripped, plus the pty
+helper and the passt binaries. `harness/ci-umapp.sh` is the
+signature/manifest/contents check and asserts the terminal classes in
+`classes.dex`, the pty entry point in `libtermux.so`, and the strings the image
+downloader needs.
 
 ### The guest image is a release, not an APK asset
 
@@ -307,13 +308,16 @@ own -- an image fix could reach a phone only through an app update, and an app
 update could reach the image only through `rootfs.revision`. It is a GitHub
 release asset now. When the image changes, the `publish` job (push to main only)
 creates a release tagged `rootfs-<date>-<run>-<attempt>` carrying
-`rootfs.ext4.gz` and `rootfs.json`, and publishes nothing when the bytes are the
-ones already there.
+`rootfs.ext4.gz` and `rootfs.json`, and publishes nothing when the guest *recipe*
+is the one already published. The recipe is what the version keys off, not the
+bytes: the ext4 is not reproducible (mke2fs writes a random UUID, `install`
+stamps the current time), so an md5 would change on every run and prompt every
+installed app on every push.
 
-The release *body* is the manifest, `{"version":…,"md5":…,"size":…}`, so one
-request to the releases API tells the app both what the newest image is and what
-it should hash to. Every start the app asks, compares the tag with the one
-recorded in `rootfs.version`, and offers a download only when they differ.
+The release *body* is the manifest, `{"version":…,"md5":…,"size":…,"recipe":…}`,
+so one request to the releases API tells the app both what the newest image is
+and what it should hash to. Every start the app asks, compares the tag with the
+one recorded in `rootfs.version`, and offers a download only when they differ.
 "Keep" remembers that version (`skipped-image`), so the question is asked once
 per image, and Settings has an entry that asks again on purpose. The download
 goes into the app's own cache and files directories: a temp file in cache, an md5
@@ -322,6 +326,33 @@ the image the guest is booting is never half-written. A fresh image is a fresh
 install, so the same `first-run` marker is written and the wizard runs. A build
 can still bake an image in with `ROOTFS_GZ` for a run with no network, and
 `ci-umapp.sh` accepts either shape.
+
+### Why the kernel stays in the APK
+
+The image can be a release asset because it is *data*. The kernel is *code*, and
+an app may not execute code it downloaded: the `untrusted_app` domain denies
+`execute` on the app's own data files, which is the same W^X rule that made UML's
+stub come from `nativeLibraryDir` instead of a memfd (measured here; see the stub
+paragraph above). `nativeLibraryDir` is the only directory an app may exec from,
+and it is populated from the APK's own `lib/arm64-v8a/`. A kernel fetched into
+`files/` or `cache/` could be downloaded and md5-checked and then refused by the
+exec anyway, so a release asset for it would buy nothing and cost a guest that
+never boots.
+
+Size was the lever that was actually available, and debug info was almost all of
+it. The bionic kernels are built with `CONFIG_DEBUG_INFO` and weigh 143 MB, of
+which 131 MB is `.debug_info`/`.debug_loc`/`.debug_line` that no phone reads. The
+android job runs `llvm-strip --strip-debug` on them, and `build-apk.sh` strips the
+staged copy again so an unstripped kernel cannot reach an APK by accident; 143 MB
+becomes 12 MB and the APK 153 MB becomes 27 MB. `--strip-all` would save 2 MB more
+and give up `.symtab`, which the gate kernels keep on purpose.
+
+The APK also carried the wrong kernel for a while: `umapp` staged `16k/linux-um`,
+the `arm64_defconfig` build, where the guest is Alpine + Docker and needs the
+namespaces, cgroup v2, overlayfs, veth, bridge and nftables of the docker config.
+It stages `16k/linux-um-docker` now, and the job compares the md5 of the
+`libuml.so` it packaged with the kernel the android job built, because
+`ci-umapp.sh` can only see "a static aarch64 ELF" and both kernels are that.
 
 ### The console: a controlling tty, and a first-run user
 

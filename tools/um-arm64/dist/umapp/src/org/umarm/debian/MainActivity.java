@@ -62,6 +62,7 @@ import java.io.InputStreamReader;
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
+import java.io.RandomAccessFile;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.security.MessageDigest;
@@ -1095,19 +1096,33 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         File out = new File(getFilesDir(), IMAGE_NAME);
         File neu = new File(getFilesDir(), IMAGE_NAME + ".new");
 
-        progress(bar, label, "unpacking", 0, 0);
+        /*
+         * The bar's maximum comes from the gzip trailer, not from the download.
+         * The extractor turns a 110 MB archive into a 1 GiB image and never says
+         * how much is left, so progress() had no total to divide by and left the
+         * bar wherever the download had put it -- full. ISIZE is the
+         * uncompressed size, and a single-member gzip (what `gzip -c` writes,
+         * and what the release carries) puts it in the last four bytes.
+         */
+        long raw = gzipIsize(gz);
+        progress(bar, label, "unpacking", 0, raw);
         InputStream in = new GZIPInputStream(new FileInputStream(gz), 65536);
         FileOutputStream fos = new FileOutputStream(neu);
         byte[] buf = new byte[1 << 16];
-        long total = 0;
+        long total = 0, last = 0;
         int n;
         while ((n = in.read(buf)) > 0) {
             fos.write(buf, 0, n);
             total += n;
-            progress(bar, label, "unpacking", total, 0);
+            /* Repaint every 8 MB: 1 GiB is 128 steps, and not 16 000 posts. */
+            if (total - last >= (8L << 20)) {
+                last = total;
+                progress(bar, label, "unpacking", total, raw);
+            }
         }
         fos.close();
         in.close();
+        progress(bar, label, "unpacking", total, raw);
 
         if (out.exists() && !out.delete())
             throw new IOException("cannot replace " + out);
@@ -1135,11 +1150,44 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
             final long done, final long total) {
         ui.post(new Runnable() {
             @Override public void run() {
-                if (total > 0) bar.setProgress((int) (done * 100 / total));
+                if (total > 0) {
+                    if (bar.isIndeterminate()) bar.setIndeterminate(false);
+                    bar.setProgress((int) (done * 100 / total));
+                } else if (!bar.isIndeterminate()) {
+                    /* No total to divide by: an animated bar and the megabyte
+                     * count, rather than a full bar that means nothing. */
+                    bar.setIndeterminate(true);
+                }
                 label.setText(what + "  " + (done >> 20)
                         + (total > 0 ? " / " + (total >> 20) : "") + " MB");
             }
         });
+    }
+
+    /**
+     * The uncompressed size of a gzip file, from its trailer.
+     *
+     * The last four bytes of a single-member gzip are ISIZE: the uncompressed
+     * size modulo 2^32, little-endian. That is the only way to learn how big the
+     * image will be before extracting it -- a GZIPInputStream does not report a
+     * total. A multi-member archive would leave only the last member's size
+     * here, so the value is a hint: progress() falls back to an indeterminate
+     * bar when it is zero, which is also what a 4 GiB image wraps to.
+     */
+    private static long gzipIsize(File f) {
+        RandomAccessFile ra = null;
+        try {
+            ra = new RandomAccessFile(f, "r");
+            if (ra.length() < 4) return 0;
+            ra.seek(ra.length() - 4);
+            long v = 0;
+            for (int i = 0; i < 4; i++) v |= ((long) ra.read()) << (8 * i);
+            return v;
+        } catch (IOException e) {
+            return 0;
+        } finally {
+            if (ra != null) try { ra.close(); } catch (IOException e) { }
+        }
     }
 
     /** A small HTTPS GET: the releases API and the asset both answer to this. */

@@ -115,6 +115,19 @@ for b in "${BINARIES[@]}"; do
 	fi
 done
 
+# The kernel is stripped once it is staged. Debug info is 131 MB of the 143 MB an
+# unstripped one weighs, no phone reads it, and this is the file a person
+# downloads -- so it ships the way a kernel is normally shipped. --strip-debug
+# keeps .symtab. The CI android job strips too; a second pass over an
+# already-stripped file is a no-op.
+STRIP=${STRIP:-$(command -v llvm-strip || command -v aarch64-linux-gnu-strip || true)}
+if [ -n "$STRIP" ] && [ -f "$OUT/lib/arm64-v8a/libuml.so" ]; then
+	before=$(stat -c%s "$OUT/lib/arm64-v8a/libuml.so")
+	"$STRIP" --strip-debug "$OUT/lib/arm64-v8a/libuml.so"
+	after=$(stat -c%s "$OUT/lib/arm64-v8a/libuml.so")
+	[ "$before" = "$after" ] || printf '   %-14s %s -> %s bytes\n' "stripped" "$before" "$after"
+fi
+
 echo "== staging assets =="
 cp -f "$INITRAMFS" "$OUT/assets/initramfs.cpio.gz"
 printf '   %-14s %s\n' "initramfs" "$(du -h "$INITRAMFS" | cut -f1)"
