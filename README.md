@@ -36,7 +36,8 @@ things Android otherwise denies it:
   the same kernel on a real terminal -- Termux's own terminal emulator, vendored
   (Apache 2.0, `dist/umapp/VENDORED-TERMUX.md`) -- and carries the Alpine +
   Docker + OpenRC image, so the guest is a shell with `docker` in it, not just a
-  boot log. `doc/100-usb.md` hands a real RTL8811AU USB dongle to the guest over
+  boot log: the console has job control, and the first boot asks for the
+  non-root user it will log in as (`doas` takes that user to root). `doc/100-usb.md` hands a real RTL8811AU USB dongle to the guest over
   USB/IP, which is how the port got `wlan0` and a scan on a phone. CI builds the
   APK (`umapp`, on an x86_64 runner because the arm64 runner images install no
   Android SDK) and checks what a device would: the signature, the aarch64 static

@@ -96,6 +96,14 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
 
     private static final String TAG = "umarm";
 
+    /*
+     * Bumped when the bundled guest image changes. The image's file name is
+     * fixed and the app unpacks it once, so without this an image fix would
+     * reach only a fresh install: rootfs.revision records what was unpacked,
+     * and a mismatch replaces the image and runs the first-run setup again.
+     */
+    private static final String ROOTFS_REVISION = "2";
+
     private TerminalView terminalView;
     private Button startStop;
     private Button ctrlKey;
@@ -710,8 +718,17 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
      */
     private File unpackAsset(String asset, String outName) throws IOException {
         File out = new File(getFilesDir(), outName);
-        if (out.exists() && out.length() > 0)
-            return out;
+        File rev = "rootfs.ext4".equals(outName)
+                ? new File(getFilesDir(), "rootfs.revision") : null;
+
+        if (out.exists() && out.length() > 0) {
+            if (rev == null || ROOTFS_REVISION.equals(firstLine(rev)))
+                return out;
+            log("the bundled image changed (" + firstLine(rev) + " -> "
+                    + ROOTFS_REVISION + "); unpacking it again\n");
+            if (!out.delete())
+                throw new IOException("cannot replace " + out);
+        }
 
         toast("unpacking " + asset + " ...");
         InputStream in = getAssets().open(asset);
@@ -729,20 +746,41 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         in.close();
         log("unpacked " + asset + " (" + (total >> 20) + " MB)\n");
 
-        /*
-         * A freshly unpacked guest image is a fresh install, and the guest's
-         * init reads this file to offer first-run setup -- it creates the
-         * non-root user and, from then on, logs in as it. It is written here
-         * and not baked into the image so that the wizard is an app boot: the
-         * image the harness and the CI gates boot has no marker, and neither
-         * does the second boot, because the guest removes it.
-         */
-        if ("rootfs.ext4".equals(outName)) {
+        if (rev != null) {
+            FileOutputStream r = new FileOutputStream(rev);
+            r.write((ROOTFS_REVISION + "\n").getBytes("UTF-8"));
+            r.close();
+
+            /*
+             * A freshly unpacked guest image is a fresh install, and the
+             * guest's init reads this file to offer first-run setup -- it
+             * creates the non-root user and, from then on, logs in as it. It is
+             * written here and not baked into the image so that the wizard is an
+             * app boot: the image the harness and the CI gates boot has no
+             * marker, and neither does the second boot, because the guest
+             * removes it.
+             */
             File marker = new File(getFilesDir(), "first-run");
             if (!marker.exists() && !marker.createNewFile())
                 log("cannot create the first-run marker; the guest boots as root\n");
         }
         return out;
+    }
+
+    /** First line of a small text file, or "" when it is missing or unreadable. */
+    private static String firstLine(File f) {
+        try {
+            BufferedReader r = new BufferedReader(new InputStreamReader(
+                    new FileInputStream(f), "UTF-8"));
+            try {
+                String s = r.readLine();
+                return s == null ? "" : s.trim();
+            } finally {
+                r.close();
+            }
+        } catch (IOException e) {
+            return "";
+        }
     }
 
     /**

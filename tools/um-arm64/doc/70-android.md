@@ -332,4 +332,8 @@ On the first app boot the guest offers to create that user: the app writes
 turns it into a wizard (username, password, optional root password), adds the
 user to `wheel` and `docker`, records it in `/var/lib/umarm/user`, and from then
 on logs in as it. The marker is written by the app and removed by the guest, so
-the harness and the gates boot the image unchanged and as root.
+the harness and the gates boot the image unchanged and as root. An app update
+replaces the image when it changes: the revision that was unpacked is kept in
+`rootfs.revision`, and a build whose revision differs unpacks the new image and
+runs the wizard again -- without that the fixed file name would keep the first
+image forever and an image fix would only reach a fresh install.
