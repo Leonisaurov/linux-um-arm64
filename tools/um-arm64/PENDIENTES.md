@@ -194,6 +194,68 @@ abajo, y quedó un handle en una esquina con un drawer (imagen, app, teclas,
 fuente, Settings). Las teclas no se perdieron: un `CTRL` latcheado sigue
 valiendo para el próximo carácter del teclado blando.
 
+## Pendiente: `doas` no tiene setuid en la imagen publicada, y el gate no lo caza
+
+**Síntoma.** En la app, como el usuario no-root que crea el asistente, `doas`
+dice `doas: not installed setuid`. En `doas.c` eso es exactamente
+`if (geteuid()) errx(1, "not installed setuid")`: el binario corre sin euid 0.
+
+**Confirmado sobre la imagen publicada**, no sobre una copia: se bajó
+`rootfs-20261014-72-1` (md5 `3f75baea…`, igual al manifiesto), se descomprimió y
+con `debugfs`:
+
+```
+/usr/bin/doas            Mode: 0755   User: 0  Group: 0     <- falta el bit
+/etc/doas.d/doas.conf    permit nopass :wheel
+```
+
+**Causa.** `apk --root` **no aplica los bits setuid/setgid** al extraer. El
+paquete sí los trae: `doas-6.8.2-r8.apk` de `main/aarch64` tiene
+`-rwsr-xr-x root/root usr/bin/doas`. Los otros dos sospechosos están descartados,
+medidos en el teléfono:
+
+- `chmod -R a+rX` sobre un archivo 4755 lo deja en 4755;
+- `mke2fs -q -t ext4 -d <stage>` sobre un stage con 4755/2755/0755 los deja en
+  04755/02755/0755.
+
+O sea que el bit se pierde en el `add` y la imagen sale en 0755. La del teléfono
+sí lo tiene (`alpine.ext4`: `/usr/bin/doas` = 04755) sólo porque ahí
+`apk add doas` se corrió **dentro** del guest, con el filesystem ya montado.
+
+**Por qué CI no lo dijo.** `harness/guest/console-init` tenía
+`fail() { echo "GATE_CONSOLE_FAIL $*"; }` —sin `exit`—, así que seguía hasta el
+final e imprimía `UMARM_CONSOLE_OK`, que es el marcador con el que `native.sh`
+decide PASS. Todos los demás gates del repo usan `fail() { echo …; exit 1; }`.
+Y la salida del guest **no** aparece en el log del job (va al `boot.log` del
+artifact), así que buscar `GATE_CONSOLE_FAIL` en el log de CI no dice nada: lo
+que se mira es el marcador, y el marcador estaba garantizado.
+
+**Arreglo: dos cambios, y van juntos.**
+
+1. `harness/guest/console-init`: `fail() { echo "GATE_CONSOLE_FAIL $*"; exit 1; }`.
+2. `harness/mkdockerimage.sh`: devolver el bit después del `apk add`, con la
+   verificación al lado, porque `--root` lo borra en silencio:
+
+   ```sh
+   $SUDO chmod 4755 "$STAGE/usr/bin/doas"
+   [ -u "$STAGE/usr/bin/doas" ] || {
+       echo "mkdockerimage.sh: doas is not setuid" >&2; exit 2; }
+   ```
+
+   (El `chmod -R a+rX` posterior no lo borra, está medido arriba.) Vale revisar si
+   otro paquete trae setuid: para esta lista el único es `doas` —el busybox de
+   Alpine no es setuid, y `sudo`, `su` y `passwd` no están instalados.
+
+**Verificación.** Con el gate arreglado, la fila `console` tiene que pasar
+*pudiendo* fallar. Después: el job `build` reconstruye la imagen y `publish` saca
+un `rootfs-*` nuevo solo, y en el teléfono hay que **reinstalar la imagen**
+(el guest se pierde y el asistente vuelve a correr) y comprobar `doas id -u` = 0
+como el usuario nuevo.
+
+**Ojo al retomarlo.** Si se commitea sólo el arreglo del gate, CI queda en rojo
+en `console` hasta que la imagen se arregle. Es el estado honesto, y por eso los
+dos cambios van en el mismo commit.
+
 ## Sin probar (resultados nulos, con razón)
 
 - **Un host de 16 KB**: no hay uno a mano en Termux; la Raspberry Pi 5
