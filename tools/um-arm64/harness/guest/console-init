@@ -19,7 +19,10 @@
 PATH=/sbin:/usr/sbin:/bin:/usr/bin
 export PATH
 
-fail() { echo "GATE_CONSOLE_FAIL $*"; }
+# exit 1, not just the echo: without it the script carried on to print
+# UMARM_CONSOLE_OK, which is the only thing the harness reads. Every other gate
+# in the tree already exits.
+fail() { echo "GATE_CONSOLE_FAIL $*"; exit 1; }
 
 mount -t proc     none /proc 2>/dev/null
 mount -t sysfs    none /sys  2>/dev/null
@@ -27,7 +30,7 @@ mount -t devtmpfs none /dev  2>/dev/null
 
 # 1. account databases are world-readable; the password hashes are not.
 for f in /etc/passwd /etc/group; do
-	[ -r "$f" ] || { fail "$f is not readable"; continue; }
+	[ -r "$f" ] || { fail "$f is not readable"; }
 	m=$(stat -c %a "$f" 2>/dev/null)
 	case $m in 644|664) : ;; *) fail "$f is mode $m, expected 0644";; esac
 done
