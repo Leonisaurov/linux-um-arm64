@@ -1,5 +1,6 @@
 package org.umarm.debian;
 
+import android.app.ActionBar;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.PendingIntent;
@@ -12,6 +13,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.graphics.Color;
+import android.graphics.Typeface;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.hardware.usb.UsbDevice;
@@ -36,6 +38,7 @@ import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.CheckBox;
@@ -45,6 +48,7 @@ import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -157,17 +161,33 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
     private TextView startStop;
     private TextView ctrlKey;
     private TextView altKey;
+    private TextView handleView;
+    /* Drag state for the handle, and the timer that shrinks it when idle. */
+    private float handleDownX, handleDownY;
+    private int handleStartX, handleStartY;
+    private boolean handleMoved;
+    private static final long HANDLE_IDLE_MS = 4000;
+    private final Runnable shrinkHandle = new Runnable() {
+        @Override public void run() { shrinkHandleNow(); }
+    };
 
     /* Extra-key state, read by the view for the soft keyboard. */
     private boolean mCtrl, mAlt, mShift, mFn;
 
     private int fontSizeSp = 12;
+    /* "monospace", "sans", "serif", or "file:<name>" for a font the user loaded. */
+    private String fontFamily = "monospace";
 
     /* Settings, persisted so a reboot of the guest does not lose them. */
     private EditText memField;
     private CheckBox seccompBox;
     private CheckBox netBox;
     private CheckBox usbBox;
+    private CheckBox autobootBox;
+    private CheckBox hideBarBox;
+    private CheckBox keepAwakeBox;
+    private CheckBox wakeLockBox;
+    private Button fontButton;
     private SharedPreferences prefs;
 
     private TerminalSession session;
@@ -192,6 +212,7 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         root.setBackgroundColor(0xFF0D0D0D);
 
         fontSizeSp = prefs.getInt("font", 12);
+        fontFamily = prefs.getString("fontFamily", "monospace");
         terminalView = new TerminalView(this, null);
         terminalView.setTerminalViewClient(this);
         terminalView.setFocusable(true);
@@ -213,20 +234,17 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         root.addView(scrim, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        TextView handle = new TextView(this);
-        handle.setText("\u2261");
-        handle.setTextSize(22);
-        handle.setTextColor(0xFFE0E0E0);
-        handle.setGravity(Gravity.CENTER);
-        handle.setBackgroundResource(R.drawable.umarm_handle_bg);
-        handle.setClickable(true);
-        handle.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) { toggleDrawer(); }
-        });
+        handleView = new TextView(this);
+        handleView.setText("\u2261");
+        handleView.setTextSize(22);
+        handleView.setTextColor(0xFFE0E0E0);
+        handleView.setGravity(Gravity.CENTER);
+        handleView.setBackgroundResource(R.drawable.umarm_handle_bg);
+        handleView.setClickable(true);
+        handleView.setOnTouchListener(handleTouch);
         FrameLayout.LayoutParams handleParams = new FrameLayout.LayoutParams(dp(44), dp(44));
         handleParams.gravity = Gravity.TOP | Gravity.START;
-        handleParams.setMargins(dp(10), dp(10), 0, 0);
-        root.addView(handle, handleParams);
+        root.addView(handleView, handleParams);
 
         drawer = buildDrawer();
         drawerWidth = Math.min(dp(300),
@@ -241,6 +259,20 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
 
         loadSettings();
         paintModifiers();
+        applyFont();
+        applyChrome();
+
+        /*
+         * Where the handle goes is only known once the content has been laid
+         * out, and the idle timer starts from there too: it shrinks a few
+         * seconds after the app opens, not the moment it does.
+         */
+        root.post(new Runnable() {
+            @Override public void run() {
+                restoreHandlePosition();
+                ui.postDelayed(shrinkHandle, HANDLE_IDLE_MS);
+            }
+        });
 
         log("umarm -- Linux/UML on aarch64, Termux terminal, inside an Android app\n");
         log("uid " + android.os.Process.myUid() + " libdir "
@@ -249,6 +281,14 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
 
         usbAttachNotice(getIntent());
         checkUpdatesAsync(false);
+
+        /*
+         * Boot without a tap when the user asked for it. onCreate and not
+         * onResume: onResume also fires after the font picker or a dialog, and a
+         * guest that started once should not be restarted by coming back to the
+         * app.
+         */
+        if (prefs.getBoolean("autoboot", false) && !isGuestRunning()) boot();
 
         showKeyboardSoon();
     }
@@ -262,12 +302,19 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
     protected void onNewIntent(Intent i) {
         super.onNewIntent(i);
         setIntent(i);
+        /* "Stop" on the notification: the service asked us to end the guest. */
+        if (UmarmService.ACTION_STOP.equals(i.getAction())) {
+            stopGuest();
+            return;
+        }
         usbAttachNotice(i);
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        /* The platform can put the bar back on its own; the preference wins. */
+        applyChrome();
         if (terminalView != null && terminalView.mEmulator != null)
             terminalView.onScreenUpdated();
     }
@@ -524,6 +571,92 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         terminalView.requestFocus();
     }
 
+    /*
+     * The handle moves. A tap opens the panel, a drag puts it anywhere the user
+     * wants, and the place is remembered as a fraction of the screen so a
+     * rotation or a different device cannot leave it off-screen. When it is left
+     * alone it shrinks and fades, because a permanent 44dp square over a terminal
+     * is the chrome this app is trying not to have.
+     */
+    private final View.OnTouchListener handleTouch = new View.OnTouchListener() {
+        @Override public boolean onTouch(View v, MotionEvent e) {
+            switch (e.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                handleDownX = e.getRawX();
+                handleDownY = e.getRawY();
+                handleStartX = Math.round(v.getX());
+                handleStartY = Math.round(v.getY());
+                handleMoved = false;
+                wakeHandle();
+                return true;
+            case MotionEvent.ACTION_MOVE: {
+                float dx = e.getRawX() - handleDownX;
+                float dy = e.getRawY() - handleDownY;
+                if (!handleMoved && Math.abs(dx) < dp(6) && Math.abs(dy) < dp(6))
+                    return true;
+                handleMoved = true;
+                v.setX(clamp(handleStartX + dx, 0, root.getWidth() - v.getWidth()));
+                v.setY(clamp(handleStartY + dy, 0, root.getHeight() - v.getHeight()));
+                return true;
+            }
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL:
+                if (handleMoved) saveHandlePosition(); else toggleDrawer();
+                ui.removeCallbacks(shrinkHandle);
+                ui.postDelayed(shrinkHandle, HANDLE_IDLE_MS);
+                return true;
+            }
+            return false;
+        }
+    };
+
+    private static float clamp(float v, float lo, float hi) {
+        if (hi < lo) hi = lo;
+        return v < lo ? lo : (v > hi ? hi : v);
+    }
+
+    /** Full size and opaque while it is in use. */
+    private void wakeHandle() {
+        ui.removeCallbacks(shrinkHandle);
+        if (handleView == null) return;
+        handleView.animate().cancel();
+        handleView.setScaleX(1f);
+        handleView.setScaleY(1f);
+        handleView.setAlpha(1f);
+    }
+
+    private void shrinkHandleNow() {
+        if (handleView == null) return;
+        handleView.animate().scaleX(0.62f).scaleY(0.62f).alpha(0.45f)
+                .setDuration(400).start();
+    }
+
+    private void saveHandlePosition() {
+        if (handleView == null) return;
+        float w = root.getWidth() - handleView.getWidth();
+        float h = root.getHeight() - handleView.getHeight();
+        prefs.edit()
+                .putFloat("handleXf", w > 0 ? handleView.getX() / w : 0f)
+                .putFloat("handleYf", h > 0 ? handleView.getY() / h : 0f)
+                .apply();
+    }
+
+    private void restoreHandlePosition() {
+        if (handleView == null || root.getWidth() == 0) return;
+        float w = root.getWidth() - handleView.getWidth();
+        float h = root.getHeight() - handleView.getHeight();
+        float fx = prefs.getFloat("handleXf", -1f);
+        float fy = prefs.getFloat("handleYf", -1f);
+        if (fx < 0f || fy < 0f) {
+            /* First run: where it always was, in the corner. */
+            handleView.setX(dp(10));
+            handleView.setY(dp(10));
+            return;
+        }
+        handleView.setX(clamp(fx * w, 0, w));
+        handleView.setY(clamp(fy * h, 0, h));
+    }
+
     @Override
     public void onBackPressed() {
         if (drawerOpen) { closeDrawer(); return; }
@@ -531,8 +664,188 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
     }
 
     private void applyFont() {
+        Typeface base = terminalTypeface();
+        terminalView.setTypeface(base, Typeface.create(base, Typeface.ITALIC));
         terminalView.setTextSize(fontSizeSp);
-        prefs.edit().putInt("font", fontSizeSp).apply();
+        prefs.edit().putInt("font", fontSizeSp).putString("fontFamily", fontFamily).apply();
+        if (fontButton != null) fontButton.setText("Font: " + fontFamilyLabel());
+    }
+
+    /*
+     * The family the terminal is drawn in. The three system families are always
+     * there; "file:" is a .ttf or .otf the user loaded, kept in the app's own
+     * files directory because the terminal needs a real file and the picked URI
+     * does not outlive the process. Anything unreadable falls back to monospace
+     * rather than leaving the terminal with no font at all.
+     */
+    private Typeface terminalTypeface() {
+        if ("sans".equals(fontFamily)) return Typeface.SANS_SERIF;
+        if ("serif".equals(fontFamily)) return Typeface.SERIF;
+        if (fontFamily != null && fontFamily.startsWith("file:")) {
+            File f = new File(getFilesDir(), fontFamily.substring("file:".length()));
+            if (f.isFile()) {
+                try {
+                    Typeface t = Typeface.createFromFile(f);
+                    if (t != null) return t;
+                } catch (RuntimeException e) {
+                    log("font " + f + " did not load: " + e + "\n");
+                }
+            }
+        }
+        return Typeface.MONOSPACE;
+    }
+
+    private File customFontFile() {
+        File f = new File(getFilesDir(), "terminal.ttf");
+        return f.isFile() ? f : null;
+    }
+
+    private String fontFamilyLabel() {
+        if ("sans".equals(fontFamily)) return "Sans-serif";
+        if ("serif".equals(fontFamily)) return "Serif";
+        if (fontFamily != null && fontFamily.startsWith("file:"))
+            return prefs.getString("fontLabel", "custom");
+        return "Monospace";
+    }
+
+    private void chooseFont() {
+        final List<String> labels = new ArrayList<String>();
+        final List<String> values = new ArrayList<String>();
+        labels.add("Monospace");  values.add("monospace");
+        labels.add("Sans-serif"); values.add("sans");
+        labels.add("Serif");      values.add("serif");
+        if (customFontFile() != null) {
+            labels.add("Loaded: " + prefs.getString("fontLabel", "terminal.ttf"));
+            values.add("file:" + customFontFile().getName());
+        }
+        labels.add("Load a font file (.ttf / .otf)\u2026");
+        values.add("pick");
+
+        new AlertDialog.Builder(this)
+                .setTitle("Terminal font")
+                .setItems(labels.toArray(new String[0]), new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface d, int which) {
+                        String v = values.get(which);
+                        if ("pick".equals(v)) { pickFontFile(); return; }
+                        fontFamily = v;
+                        applyFont();
+                    }
+                })
+                .show();
+    }
+
+    /*
+     * The document picker, not a path: an app has no useful view of the
+     * filesystem, and the font has to be copied into the app's own directory
+     * anyway so it survives the URI permission that came with the intent.
+     */
+    private static final int PICK_FONT = 41;
+
+    private void pickFontFile() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        try {
+            startActivityForResult(i, PICK_FONT);
+        } catch (Exception e) {
+            toast("no file picker here: " + e);
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int request, int result, Intent data) {
+        super.onActivityResult(request, result, data);
+        if (request != PICK_FONT || result != RESULT_OK
+                || data == null || data.getData() == null)
+            return;
+        File out = new File(getFilesDir(), "terminal.ttf");
+        try {
+            InputStream in = getContentResolver().openInputStream(data.getData());
+            if (in == null) throw new IOException("cannot open " + data.getData());
+            FileOutputStream fos = new FileOutputStream(out);
+            byte[] buf = new byte[1 << 16];
+            long total = 0;
+            int n;
+            while ((n = in.read(buf)) > 0) { fos.write(buf, 0, n); total += n; }
+            fos.close();
+            in.close();
+            if (Typeface.createFromFile(out) == null) throw new IOException("not a font");
+            String name = displayName(data.getData());
+            fontFamily = "file:" + out.getName();
+            prefs.edit().putString("fontLabel", name).apply();
+            applyFont();
+            toast("font loaded: " + name + " (" + (total / 1024) + " KB)");
+        } catch (Exception e) {
+            out.delete();
+            toast("could not load that font: " + e);
+        }
+    }
+
+    /** A readable name for a picked document, with a fallback for providers that
+     *  do not offer one. */
+    private String displayName(Uri uri) {
+        try {
+            android.database.Cursor c = getContentResolver().query(uri, null, null, null, null);
+            if (c != null) {
+                try {
+                    int i = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME);
+                    if (i >= 0 && c.moveToFirst()) {
+                        String s = c.getString(i);
+                        if (s != null && s.length() > 0) return s;
+                    }
+                } finally {
+                    c.close();
+                }
+            }
+        } catch (Exception e) {
+            /* fall through to the path segment */
+        }
+        String s = uri.getLastPathSegment();
+        return s == null ? "font" : s;
+    }
+
+    /*
+     * The top bar is the platform's ActionBar, so it can be hidden and shown
+     * again at runtime. A theme without one would be simpler, but it would turn
+     * the choice into a build-time decision instead of an option.
+     */
+    private void applyChrome() {
+        ActionBar bar = getActionBar();
+        if (bar == null) return;
+        if (prefs.getBoolean("hideBar", false)) bar.hide(); else bar.show();
+    }
+
+    /*
+     * Keep the screen on only while a guest is actually running: an idle app
+     * showing an empty terminal has no reason to hold the display awake.
+     */
+    private void applyKeepAwake() {
+        if (prefs.getBoolean("keepAwake", false) && isGuestRunning())
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        else
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+    }
+
+    /*
+     * The foreground service is what keeps the guest alive off-screen; see
+     * UmarmService. Started only while a guest is actually running, and stopped
+     * with it, so the notification never outlives the thing it describes.
+     */
+    private void startGuestService() {
+        if (Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                   != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(
+                    new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 42);
+        }
+        Intent i = new Intent(this, UmarmService.class);
+        i.setAction(UmarmService.ACTION_START);
+        i.putExtra(UmarmService.EXTRA_WAKELOCK, prefs.getBoolean("wakeLock", false));
+        startForegroundService(i);
+    }
+
+    private void stopGuestService() {
+        stopService(new Intent(this, UmarmService.class));
     }
 
     private void paintModifiers() {
@@ -602,13 +915,39 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         usbBox = new CheckBox(this);
         usbBox.setText("usb (RTL8811AU passthrough, needs net)");
         usbBox.setChecked(prefs.getBoolean("usb", false));
+
+        autobootBox = new CheckBox(this);
+        autobootBox.setText("Boot when the app opens");
+        autobootBox.setChecked(prefs.getBoolean("autoboot", false));
+
+        hideBarBox = new CheckBox(this);
+        hideBarBox.setText("Hide the top bar");
+        hideBarBox.setChecked(prefs.getBoolean("hideBar", false));
+
+        keepAwakeBox = new CheckBox(this);
+        keepAwakeBox.setText("Keep the screen on while the guest runs");
+        keepAwakeBox.setChecked(prefs.getBoolean("keepAwake", false));
+
+        wakeLockBox = new CheckBox(this);
+        wakeLockBox.setText("Wake lock (keep the CPU on with the screen off)");
+        wakeLockBox.setChecked(prefs.getBoolean("wakeLock", false));
     }
 
     private void showSettings() {
         LinearLayout v = new LinearLayout(this);
         v.setOrientation(LinearLayout.VERTICAL);
-        v.setPadding(32, 16, 32, 16);
+        v.setPadding(dp(20), dp(4), dp(20), dp(4));
 
+        drawerSection(v, "Appearance");
+        v.addView(hideBarBox);
+        v.addView(buildFontRow());
+
+        drawerSection(v, "Startup");
+        v.addView(autobootBox);
+        v.addView(keepAwakeBox);
+        v.addView(wakeLockBox);
+
+        drawerSection(v, "Guest");
         LinearLayout memRow = new LinearLayout(this);
         memRow.setOrientation(LinearLayout.HORIZONTAL);
         memRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -617,7 +956,6 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         memRow.addView(l);
         memRow.addView(memField);
         v.addView(memRow);
-
         v.addView(seccompBox);
         v.addView(netBox);
         v.addView(usbBox);
@@ -629,11 +967,15 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         });
         v.addView(probe);
 
-        /* The update entries live in the drawer; this dialog is only how the
-         * guest is configured. */
+        /* The dialog can be taller than a phone screen, so it scrolls. The update
+         * entries live in the drawer; this dialog is only how the app and the
+         * guest are configured. */
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(v);
+
         new AlertDialog.Builder(this)
-                .setTitle("umarm")
-                .setView(v)
+                .setTitle("umarm settings")
+                .setView(scroll)
                 .setPositiveButton("Save", new DialogInterface.OnClickListener() {
                     @Override public void onClick(DialogInterface d, int which) {
                         prefs.edit()
@@ -641,11 +983,57 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
                                 .putBoolean("seccomp", seccompBox.isChecked())
                                 .putBoolean("net", netBox.isChecked())
                                 .putBoolean("usb", usbBox.isChecked())
+                                .putBoolean("autoboot", autobootBox.isChecked())
+                                .putBoolean("hideBar", hideBarBox.isChecked())
+                                .putBoolean("keepAwake", keepAwakeBox.isChecked())
+                                .putBoolean("wakeLock", wakeLockBox.isChecked())
                                 .apply();
+                        applyChrome();
+                        applyKeepAwake();
+                        /* The wakelock lives in the service, so a change to it
+                         * only takes effect if the service is told again. */
+                        if (isGuestRunning()) startGuestService();
                     }
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
+    }
+
+    /*
+     * Font size and family in one place: the size on a slider, the family behind
+     * a chooser, both applied as they change so the terminal shows the result
+     * instead of describing it.
+     */
+    private View buildFontRow() {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.VERTICAL);
+
+        final TextView value = new TextView(this);
+        value.setText("Font size " + fontSizeSp + " sp");
+        row.addView(value);
+
+        SeekBar size = new SeekBar(this);
+        size.setMax(32 - 6);
+        size.setProgress(fontSizeSp - 6);
+        size.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar s, int p, boolean fromUser) {
+                if (!fromUser) return;
+                fontSizeSp = 6 + p;
+                value.setText("Font size " + fontSizeSp + " sp");
+                applyFont();
+            }
+            @Override public void onStartTrackingTouch(SeekBar s) { }
+            @Override public void onStopTrackingTouch(SeekBar s) { }
+        });
+        row.addView(size);
+
+        fontButton = new Button(this);
+        fontButton.setText("Font: " + fontFamilyLabel());
+        fontButton.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View w) { chooseFont(); }
+        });
+        row.addView(fontButton);
+        return row;
     }
 
     /* ------------------------------------------------------------------
@@ -785,6 +1173,8 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
             terminalView.attachSession(session);
             terminalView.requestFocus();
             showKeyboardSoon();
+            applyKeepAwake();
+            startGuestService();
         } catch (Exception e) {
             fail("ERROR: could not start the guest: " + e);
         }
@@ -797,12 +1187,15 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         session = null;
         startStop.setText("Boot");
         usbRelease();
+        applyKeepAwake();
+        stopGuestService();
     }
 
     private void fail(String s) {
         log(s + "\n");
         toast(s);
         startStop.setText("Boot");
+        applyKeepAwake();
     }
 
     /* ------------------------------------------------------------------
@@ -821,6 +1214,8 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         log("[guest exited]\n");
         startStop.setText("Boot");
         usbRelease();
+        applyKeepAwake();
+        stopGuestService();
     }
 
     @Override public void onCopyTextToClipboard(TerminalSession s, String text) {
@@ -855,10 +1250,7 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
             boolean increase = scale > 1.f;
             int old = fontSizeSp;
             fontSizeSp = Math.max(6, Math.min(32, increase ? fontSizeSp + 1 : fontSizeSp - 1));
-            if (fontSizeSp != old) {
-                terminalView.setTextSize(fontSizeSp);
-                prefs.edit().putInt("font", fontSizeSp).apply();
-            }
+            if (fontSizeSp != old) applyFont();
             return 1.0f;
         }
         return scale;

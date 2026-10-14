@@ -190,9 +190,23 @@ así que `ApkProvider` es esa parte escrita a mano: un nombre en el cache, sólo
 lectura, no exportado, con el permiso de URI otorgado por intent.
 
 La UI, además: se fueron la barra de botones de arriba y la tira de teclas de
-abajo, y quedó un handle en una esquina con un drawer (imagen, app, teclas,
-fuente, Settings). Las teclas no se perdieron: un `CTRL` latcheado sigue
-valiendo para el próximo carácter del teclado blando.
+abajo, y quedó un handle con un drawer (imagen, app, teclas, fuente, Settings).
+El handle se arrastra, recuerda dónde quedó —como fracción de la pantalla, así
+sobrevive la rotación— y se encoge y aclara solo cuando nadie lo usa. En Settings,
+por secciones: ocultar la ActionBar de Android, arrancar el guest al abrir la app
+(`onCreate`), mantener la pantalla encendida, wake lock (CPU despierta con la
+pantalla apagada) y la fuente (Monospace/Sans-serif/Serif o un `.ttf`/`.otf`
+propio, con slider de tamaño). Las teclas no se perdieron: un `CTRL` latcheado
+sigue valiendo para el próximo carácter del teclado blando.
+
+Y el guest ya no muere por mirar otra cosa: mientras corre hay un
+`UmarmService` en primer plano (tipo `specialUse`) con una notificación
+permanente —un tap vuelve a la terminal, "Stop" termina el guest—, que es lo que
+mantiene vivo el proceso cuando la Activity queda en segundo plano. El servicio
+no es dueño de la sesión: la sesión vive en la Activity, con la vista que la
+dibuja, y un servicio del mismo proceso alcanza para que Android no lo reclame.
+El wake lock es lo que el nombre dice, un `PARTIAL_WAKE_LOCK` en el servicio, no
+el `FLAG_KEEP_SCREEN_ON` de la ventana.
 
 ## Cerrado: `doas` sin setuid en la imagen publicada, y el gate que no lo veía
 

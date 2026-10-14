@@ -49,6 +49,20 @@
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!--
+      A Linux kernel the user started should not die because they looked at
+      something else. Android only lets a process say that through a foreground
+      service, which is what UmarmService is: the ongoing notification is the
+      price, and the wakelock keeps the CPU running with the screen off.
+      POST_NOTIFICATIONS is a runtime permission from API 33 and is asked for
+      when the guest boots; the notification is still the service's, denied or
+      not, and the guest keeps running either way.
+    -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <!--
       USB host mode, for handing a Realtek RTL8811AU through to the guest.
 
       required="false" on purpose: this is the app's optional trick, not its
@@ -118,5 +132,20 @@
             android:authorities="org.umarm.debian.apk"
             android:exported="false"
             android:grantUriPermissions="true" />
+
+        <!--
+          The foreground service that keeps the guest alive off-screen. The
+          type is specialUse because what it runs is a guest the user started,
+          not a download or a sync, and API 34 requires a type. Not exported:
+          nothing outside the app has any reason to start or stop it.
+        -->
+        <service
+            android:name=".UmarmService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="runs a Linux guest the user started, stoppable from its notification" />
+        </service>
     </application>
 </manifest>
