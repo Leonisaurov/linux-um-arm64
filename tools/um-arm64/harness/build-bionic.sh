@@ -180,6 +180,21 @@ make -C "$TREE" O="$O" ARCH=um SUBARCH=arm64 LLVM=1 "${HOST_ARGS[@]}" -j"$JOBS" 
 # waiting for frames that never come.
 "$TREE"/scripts/config --file "$O/.config" -e STATIC_LINK -e UML_NET_VECTOR
 
+# The version string is part of the APK's identity, and this repository is the
+# kernel, so it must not be part of the *build*. LOCALVERSION_AUTO, which
+# init/Kconfig defaults to y, appends `git describe` of the repository HEAD --
+# scripts/setlocalversion reads it straight out of git -- so every commit,
+# including one that touches nothing the kernel compiles, gave the kernel a
+# different UTS_RELEASE and therefore different bytes. build-apk.sh hashes those
+# bytes into the recipe that decides whether the app has an update, so the effect
+# was a new release, and an update offered to every installed app, for every push.
+# The suffix is a fixed string here instead of a commit.
+#
+# The glibc kernels keep the automatic one: nothing ships them, and which commit
+# a boot gate ran is worth having in its log.
+"$TREE"/scripts/config --file "$O/.config" \
+    -d LOCALVERSION_AUTO --set-str LOCALVERSION "-umarm"
+
 # Page size. Asserted after olddefconfig rather than assumed before it:
 # `scripts/config -e SYMBOL` on a symbol that does not exist prints a warning and
 # carries on, and the result would be a kernel that boots everywhere except the
