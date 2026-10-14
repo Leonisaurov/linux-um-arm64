@@ -63,6 +63,14 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <!--
+      A wakelock keeps the CPU awake; this is what stops Android (and an OEM
+      battery manager) from freezing the app anyway. The declaration is the
+      whole permission (it is not a runtime prompt): the answer comes from a
+      system dialog the app may ask for and cannot fake.
+    -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!--
       USB host mode, for handing a Realtek RTL8811AU through to the guest.
 
       required="false" on purpose: this is the app's optional trick, not its

@@ -27,6 +27,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
+import android.os.PowerManager;
 import android.system.Os;
 import android.system.OsConstants;
 import android.provider.Settings;
@@ -42,6 +43,7 @@ import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.CheckBox;
+import android.widget.CompoundButton;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
@@ -187,6 +189,8 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
     private CheckBox hideBarBox;
     private CheckBox keepAwakeBox;
     private CheckBox wakeLockBox;
+    /* Whether the battery-optimization question has been asked this run. */
+    private boolean batteryAsked;
     private Button fontButton;
     private SharedPreferences prefs;
 
@@ -840,12 +844,58 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         }
         Intent i = new Intent(this, UmarmService.class);
         i.setAction(UmarmService.ACTION_START);
-        i.putExtra(UmarmService.EXTRA_WAKELOCK, prefs.getBoolean("wakeLock", false));
+        boolean wake = prefs.getBoolean("wakeLock", false);
+        i.putExtra(UmarmService.EXTRA_WAKELOCK, wake);
         startForegroundService(i);
+        /* A wakelock without the exemption is the wakelock Android ignores. */
+        if (wake) askBatteryExemption(false);
     }
 
     private void stopGuestService() {
         stopService(new Intent(this, UmarmService.class));
+    }
+
+    /*
+     * The wakelock keeps the CPU awake; battery optimization is the other half,
+     * and it is the half that freezes the whole app. Android has one dialog for
+     * this, and the app can only ask for it -- Settings
+     * .ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, with this package in the
+     * data URI. Some builds do not have the direct dialog, so the list is the
+     * fallback rather than an error.
+     */
+    private void askBatteryExemption(boolean manual) {
+        PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+        if (pm == null || pm.isIgnoringBatteryOptimizations(getPackageName())) {
+            if (manual) toast("umarm is already exempt from battery optimization");
+            return;
+        }
+        if (batteryAsked && !manual) return;
+        batteryAsked = true;
+        new AlertDialog.Builder(this)
+                .setTitle("Battery optimization")
+                .setMessage("Android can still freeze the guest to save power, even with a "
+                        + "wakelock. Exclude umarm from battery optimization?")
+                .setPositiveButton("Open settings", new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface d, int which) {
+                        requestBatteryExemption();
+                    }
+                })
+                .setNegativeButton("Not now", null)
+                .show();
+    }
+
+    private void requestBatteryExemption() {
+        try {
+            Intent i = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+            i.setData(Uri.parse("package:" + getPackageName()));
+            startActivity(i);
+        } catch (Exception e) {
+            try {
+                startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+            } catch (Exception e2) {
+                toast("no battery optimization settings on this device: " + e2);
+            }
+        }
     }
 
     private void paintModifiers() {
@@ -931,6 +981,12 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         wakeLockBox = new CheckBox(this);
         wakeLockBox.setText("Wake lock (keep the CPU on with the screen off)");
         wakeLockBox.setChecked(prefs.getBoolean("wakeLock", false));
+        /* After setChecked, so restoring the preference does not ask again. */
+        wakeLockBox.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            @Override public void onCheckedChanged(CompoundButton b, boolean checked) {
+                if (checked) askBatteryExemption(false);
+            }
+        });
     }
 
     private void showSettings() {
@@ -946,6 +1002,13 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         v.addView(autobootBox);
         v.addView(keepAwakeBox);
         v.addView(wakeLockBox);
+
+        Button battery = new Button(this);
+        battery.setText("Battery optimization\u2026");
+        battery.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View w) { askBatteryExemption(true); }
+        });
+        v.addView(battery);
 
         drawerSection(v, "Guest");
         LinearLayout memRow = new LinearLayout(this);
