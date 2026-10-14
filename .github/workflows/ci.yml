@@ -276,6 +276,76 @@ jobs:
           path: ${{ runner.temp }}/artifacts/
           retention-days: 14
 
+  # Publish the guest image as a release asset, which is now how the app gets
+  # one: the APK carries no image, so these releases *are* the app's guest.
+  #
+  # The release body is the manifest -- {"version":..., "md5":..., "size":...}
+  # -- and the app reads it from the releases API, one request, to decide whether
+  # the image it has installed is the newest one. One release per image rather
+  # than a fixed tag, because the release list is then the image's history; and
+  # the md5 is compared first, so a new tag appears only when the bytes changed
+  # and the ~20 runs in between publish nothing at all.
+  #
+  # Push to main only. A pull request runs with a read-only token, and the guest
+  # image a PR would publish is not one anybody asked for.
+  publish:
+    name: publish the guest image
+    needs: [build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Download the image
+        uses: actions/download-artifact@v4
+        with:
+          name: um-arm64-kernels
+          path: ${{ runner.temp }}/image
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gz="$RUNNER_TEMP/image/alpine-docker.ext4.gz"
+          ls -la "$(dirname "$gz")"
+          md5=$(md5sum "$gz" | cut -d' ' -f1)
+          size=$(stat -c%s "$gz")
+          echo "image md5=$md5 size=$size"
+
+          # The newest rootfs-* release and the md5 its body advertises. `gh api`
+          # lists releases newest first, so the first match is the current one.
+          prev=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=20" \
+                   --jq '[.[] | select(.tag_name | startswith("rootfs-"))] | .[0] // empty')
+          prev_md5=""
+          if [ -n "$prev" ]; then
+              prev_md5=$(printf '%s' "$prev" | jq -r '.body // empty' \
+                           | jq -r '.md5 // empty' 2>/dev/null || true)
+          fi
+          if [ -n "$prev_md5" ] && [ "$prev_md5" = "$md5" ]; then
+              echo "the published image is already these bytes; nothing to publish"
+              exit 0
+          fi
+
+          # Run attempt in the tag so a re-run cannot collide with the release its
+          # first attempt left behind; the md5 check above is what keeps re-runs
+          # from publishing twice when the first one succeeded.
+          tag="rootfs-$(date -u +%Y%m%d)-$GITHUB_RUN_NUMBER-$GITHUB_RUN_ATTEMPT"
+          printf '{"version":"%s","md5":"%s","size":%s,"image":"rootfs.ext4.gz"}\n' \
+              "$tag" "$md5" "$size" > "$RUNNER_TEMP/rootfs.json"
+          cp "$gz" "$RUNNER_TEMP/rootfs.ext4.gz"
+
+          # The body *is* the manifest, and the asset of the same name is the
+          # same bytes for anyone reading the release by hand.
+          gh release create "$tag" \
+              -R "$GITHUB_REPOSITORY" \
+              "$RUNNER_TEMP/rootfs.ext4.gz" \
+              "$RUNNER_TEMP/rootfs.json" \
+              --title "Guest image $tag" \
+              --notes-file "$RUNNER_TEMP/rootfs.json"
+          echo "published $tag"
+
   # The gates below prove the port. This job proves the *artifact*: the launcher
   # a person actually uses, driven through the contract dist/umdebian/README.md
   # documents -- a command in, its output out, its status propagated, the host
@@ -670,13 +740,12 @@ jobs:
           install -m 0755 "$RUNNER_TEMP/artifacts/um-arm64-android/16k/umusb"      "$ROOT/dist/umdebian/umusb"
           install -m 0755 "$RUNNER_TEMP/artifacts/um-arm64-android/16k/sockprobe"  "$ROOT/artifacts/sockprobe_bionic"
           install -m 0755 "$RUNNER_TEMP/artifacts/um-arm64-android/16k/libtermux.so" "$ROOT/artifacts/libtermux_bionic"
-          # The guest image the APK carries: the same Alpine + Docker + OpenRC
-          # ext4 the rc-docker gate boots, gzipped. Without it the app boots
-          # only the small Alpine initramfs, which is a shell and nothing else.
-          export ROOTFS_GZ="$RUNNER_TEMP/artifacts/um-arm64-kernels/alpine-docker.ext4.gz"
-          # The Alpine initramfs, which is the guest the app boots when it has
-          # no disk image: a real busybox and a real shell. It used to be the
-          # gate-2 fixture because the tree had no producer for an Alpine one.
+          # The guest image is no longer built into the APK. It is 144 MB, it
+          # changes on the image's schedule rather than the app's, and bundling
+          # it made an app update the only way to get a new one -- so the publish
+          # job below puts it on a release and the app downloads it. What stays
+          # here is the Alpine initramfs: small, and the guest the app boots
+          # while it has no image yet, or when the download was declined.
           export INITRAMFS="$RUNNER_TEMP/artifacts/um-arm64-kernels/initramfs-alpine.cpiogz"
           echo "ANDROID_HOME=${ANDROID_HOME:-unset} JAVA_HOME=${JAVA_HOME:-unset}"
           bash tools/um-arm64/dist/umapp/build-apk.sh

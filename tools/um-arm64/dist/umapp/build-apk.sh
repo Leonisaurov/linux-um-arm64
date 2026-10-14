@@ -81,7 +81,10 @@ BINARIES=(
 INITRAMFS=${INITRAMFS:-$ROOT/rootfs/initramfs-alpine.cpio.gz}
 rm -f "$(dirname "$0")/umarm.apk"
 
-ROOTFS_GZ=${ROOTFS_GZ:-}		# optional: a gzipped ext4 to ship as the root disk
+# Off by default: a gzipped ext4 to bake into the APK. The app downloads its
+# guest image from a release instead, so this is for a build that has to run with
+# no network at all -- ci-umapp.sh still checks it when it is present.
+ROOTFS_GZ=${ROOTFS_GZ:-}
 
 for t in "$BT/aapt2" "$BT/d8" "$BT/apksigner"; do
 	[ -x "$t" ] || { echo "build-apk: missing $t" >&2; exit 2; }

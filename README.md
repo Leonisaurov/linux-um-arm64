@@ -34,16 +34,17 @@ things Android otherwise denies it:
   makes the gate matrix below affordable rather than aspirational.
 * **The thin edges of the platform.** `dist/umapp` is an Android app that runs
   the same kernel on a real terminal -- Termux's own terminal emulator, vendored
-  (Apache 2.0, `dist/umapp/VENDORED-TERMUX.md`) -- and carries the Alpine +
-  Docker + OpenRC image, so the guest is a shell with `docker` in it, not just a
-  boot log: the console has job control, and the first boot asks for the
-  non-root user it will log in as (`doas` takes that user to root). `doc/100-usb.md` hands a real RTL8811AU USB dongle to the guest over
+  (Apache 2.0, `dist/umapp/VENDORED-TERMUX.md`) -- and turns the Alpine + Docker
+  + OpenRC image into a shell with `docker` in it, not just a boot log: the
+  console has job control, and the first boot asks for the non-root user it will
+  log in as (`doas` takes that user to root). The image is a release asset the
+  app checks for and downloads rather than something the APK carries, so the APK
+  stays a kernel and an image fix is a release, not an app update. `doc/100-usb.md` hands a real RTL8811AU USB dongle to the guest over
   USB/IP, which is how the port got `wlan0` and a scan on a phone. CI builds the
   APK (`umapp`, on an x86_64 runner because the arm64 runner images install no
   Android SDK) and checks what a device would: the signature, the aarch64 static
   binaries inside `lib/arm64-v8a/`, the terminal classes in `classes.dex`, the
-  pty shared object, the assets (including the gzipped guest image) and the
-  manifest.
+  pty shared object, the assets, the downloader, and the manifest.
 
 What it is **not**: hardware, a second CPU (the guest is uniprocessor), a 32-bit
 compat layer, or an escape from the host. Every guest syscall is a host syscall

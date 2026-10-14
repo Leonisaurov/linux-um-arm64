@@ -9,7 +9,8 @@ realmente sigue sin probar. El detalle largo vive en `doc/80-docker-alpine.md`
 - Repo: `/data/data/com.termux/files/home/Develop/Clones/linux-um-arm64`
   (rama `main`).
 - La app Android (`dist/umapp`) es ahora una terminal real (el emulador de
-  Termux, vendorizado) y lleva la imagen Alpine+Docker+openrc adentro; ver
+  Termux, vendorizado). La imagen Alpine+Docker+openrc ya **no** va adentro: es
+  un release de GitHub que la app busca y baja sola. Ver
   `dist/umapp/VENDORED-TERMUX.md` y `doc/70-android.md`.
 
 ## Cerrado: user namespaces
@@ -92,6 +93,29 @@ root opcional), lo agrega a `wheel` y `docker`, lo recuerda en
 y lo borra el guest: el harness y los gates arrancan la imagen sin tocarla y como
 root.
 
+## Cerrado: la imagen era un asset del APK
+
+La imagen iba gzippeada adentro del APK (144 MB), y eso hacía 289 MB cada build
+de la app y convertía al APK en la unidad de versionado de algo que no es suyo:
+un arreglo de la imagen sólo llegaba al teléfono con una actualización de la app.
+Ahora la imagen es un asset de un release de GitHub. Cuando cambia, el job
+`publish` (sólo en `push` a `main`) crea un release
+`rootfs-<fecha>-<run>-<attempt>` con `rootfs.ext4.gz` y `rootfs.json`, y no
+publica nada si los bytes son los que ya están.
+
+El *body* del release es el manifiesto (`{"version":…,"md5":…,"size":…}`), así
+que una sola consulta a la API de releases le dice a la app cuál es la última
+imagen y con qué hash tiene que coincidir. En cada arranque la app consulta,
+compara el tag con el que guardó en `rootfs.version` y ofrece bajar sólo si
+difieren. "Keep" recuerda esa versión, así que la pregunta se hace una vez por
+imagen, y en Settings hay una entrada que vuelve a preguntar a propósito. La
+descarga va al cache y a los files de la app: archivo temporal, chequeo de md5,
+gunzip a `rootfs.ext4.new` y rename sobre `rootfs.ext4`, para que la imagen que
+el guest está booteando nunca quede a medio escribir. Imagen nueva es instalación
+nueva, así que se escribe el mismo marcador `first-run` y corre el asistente. Un
+build puede seguir metiendo una imagen con `ROOTFS_GZ` para correr sin red, y
+`ci-umapp.sh` acepta las dos formas.
+
 ## Sin probar (resultados nulos, con razón)
 
 - **Un host de 16 KB**: no hay uno a mano en Termux; la Raspberry Pi 5
@@ -113,11 +137,12 @@ gates en un commit de docs, `workflow_dispatch`.
 Dos filas nuevas en la matriz: `userns`/`userns-skip` (kernel `docker` y
 `default`, imagen `alpine.ext4`) y `rc-docker` (kernel `docker`, imagen
 `alpine-docker.ext4`, la que construye `mkdockerimage.sh` y que la app
-empaqueta). Y `console` (kernel `docker`, imagen `alpine-docker.ext4`,
+descarga). Y `console` (kernel `docker`, imagen `alpine-docker.ext4`,
 `init=/console-init`) chequea lo que rompió la consola: modos de `/etc/passwd`,
 `doas` setuid, que un usuario nuevo se resuelva a sí mismo y que la tty de
 consola se pueda tomar como controladora. El job `build` construye esa imagen y
-la sube con el resto.
+la sube con el resto, y el job `publish` la publica como release (con el
+`paths-ignore` de siempre, un commit de docs no republica nada).
 
 Detalle que costó tiempo: `harness/umalpine.sh` en modo one-shot **bufferiza**
 toda la salida del guest y la imprime recién cuando el kernel sale. Si el guest

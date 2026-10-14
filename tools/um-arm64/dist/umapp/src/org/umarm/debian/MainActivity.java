@@ -38,9 +38,14 @@ import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
 
 import com.termux.terminal.TerminalSession;
 import com.termux.terminal.TerminalSessionClient;
@@ -55,7 +60,11 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -97,12 +106,32 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
     private static final String TAG = "umarm";
 
     /*
-     * Bumped when the bundled guest image changes. The image's file name is
-     * fixed and the app unpacks it once, so without this an image fix would
-     * reach only a fresh install: rootfs.revision records what was unpacked,
-     * and a mismatch replaces the image and runs the first-run setup again.
+     * The guest image is not in the APK. It is 144 MB gzipped, and bundling it
+     * made every app build 289 MB, made an image fix reach only a fresh install,
+     * and made the app the unit of versioning for something it does not own. It
+     * is published as a GitHub release asset instead, and this is where the app
+     * looks for it.
+     *
+     * The release's *body* is the manifest -- a small JSON object with the md5
+     * and the byte count -- so one request to the releases API says both what the
+     * newest image is and whether the installed one is it. The releases list
+     * comes back newest first, so the first rootfs-* entry is the latest.
      */
-    private static final String ROOTFS_REVISION = "2";
+    private static final String RELEASES_API =
+            "https://api.github.com/repos/Leonisaurov/linux-um-arm64/releases?per_page=10";
+    private static final String IMAGE_TAG_PREFIX = "rootfs-";
+    private static final String IMAGE_ASSET = "rootfs.ext4.gz";
+    private static final String IMAGE_NAME = "rootfs.ext4";
+    private static final String IMAGE_VERSION = "rootfs.version";
+    private static final String IMAGE_SKIPPED = "skipped-image";
+
+    /*
+     * Bumped when a small asset that does ship inside the APK changes. Its name
+     * is fixed and it is unpacked once, so without this an update would keep the
+     * first copy forever. The guest image is not one of these: it carries its own
+     * version, the release tag.
+     */
+    private static final String ASSET_REVISION = "3";
 
     private TerminalView terminalView;
     private Button startStop;
@@ -262,6 +291,7 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
                 + getApplicationInfo().nativeLibraryDir + "\n");
 
         usbAttachNotice(getIntent());
+        checkImageAsync(false);
 
         showKeyboardSoon();
     }
@@ -400,7 +430,18 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         });
         v.addView(probe);
 
-        new AlertDialog.Builder(this)
+        final AlertDialog[] settings = new AlertDialog[1];
+        Button image = new Button(this);
+        image.setText("Update the guest image");
+        image.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View w) {
+                if (settings[0] != null) settings[0].dismiss();
+                checkImageAsync(true);
+            }
+        });
+        v.addView(image);
+
+        settings[0] = new AlertDialog.Builder(this)
                 .setTitle("umarm")
                 .setView(v)
                 .setPositiveButton("Save", new DialogInterface.OnClickListener() {
@@ -414,7 +455,8 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
                     }
                 })
                 .setNegativeButton("Cancel", null)
-                .show();
+                .create();
+        settings[0].show();
     }
 
     /* ------------------------------------------------------------------
@@ -445,19 +487,18 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
             return;
         }
 
+        File rootfs = guestImage();
         File initrd = null;
-        File rootfs = null;
-        try {
-            rootfs = unpackAsset("rootfs.ext4.gz", "rootfs.ext4");
-        } catch (IOException e) {
-            /* Optional: the image is what carries docker and persistence; the
-             * initramfs is the fallback that always ships. */
-        }
         if (rootfs == null) {
+            /*
+             * No image yet: the download has not been accepted, or has not
+             * finished. The initramfs still ships and is a real shell, so the
+             * app boots rather than explaining that it cannot.
+             */
             try {
                 initrd = unpackAsset("initramfs.cpio.gz", "initramfs.cpio.gz");
             } catch (IOException e) {
-                fail("ERROR: neither rootfs.ext4.gz nor initramfs.cpio.gz in the APK: " + e);
+                fail("ERROR: no guest image is installed and the APK has no initramfs: " + e);
                 return;
             }
         }
@@ -715,17 +756,18 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
     /**
      * Unpack a gzipped asset once, into the app's private files directory.
      * Data, not code -- so it may live here; it just may not be executed.
+     *
+     * The revision is compared first: the name is fixed, so an APK that ships a
+     * new copy of a small asset would otherwise keep whatever it unpacked the
+     * first time. The guest image is not one of these; it has a version of its
+     * own, the release tag.
      */
     private File unpackAsset(String asset, String outName) throws IOException {
         File out = new File(getFilesDir(), outName);
-        File rev = "rootfs.ext4".equals(outName)
-                ? new File(getFilesDir(), "rootfs.revision") : null;
-
+        File rev = new File(getFilesDir(), outName + ".revision");
         if (out.exists() && out.length() > 0) {
-            if (rev == null || ROOTFS_REVISION.equals(firstLine(rev)))
+            if (ASSET_REVISION.equals(firstLine(rev)))
                 return out;
-            log("the bundled image changed (" + firstLine(rev) + " -> "
-                    + ROOTFS_REVISION + "); unpacking it again\n");
             if (!out.delete())
                 throw new IOException("cannot replace " + out);
         }
@@ -746,24 +788,9 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         in.close();
         log("unpacked " + asset + " (" + (total >> 20) + " MB)\n");
 
-        if (rev != null) {
-            FileOutputStream r = new FileOutputStream(rev);
-            r.write((ROOTFS_REVISION + "\n").getBytes("UTF-8"));
-            r.close();
-
-            /*
-             * A freshly unpacked guest image is a fresh install, and the
-             * guest's init reads this file to offer first-run setup -- it
-             * creates the non-root user and, from then on, logs in as it. It is
-             * written here and not baked into the image so that the wizard is an
-             * app boot: the image the harness and the CI gates boot has no
-             * marker, and neither does the second boot, because the guest
-             * removes it.
-             */
-            File marker = new File(getFilesDir(), "first-run");
-            if (!marker.exists() && !marker.createNewFile())
-                log("cannot create the first-run marker; the guest boots as root\n");
-        }
+        FileOutputStream r = new FileOutputStream(rev);
+        r.write((ASSET_REVISION + "\n").getBytes("UTF-8"));
+        r.close();
         return out;
     }
 
@@ -781,6 +808,378 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         } catch (IOException e) {
             return "";
         }
+    }
+
+    /* ------------------------------------------------------------------
+     * The guest image, as a release asset
+     * ------------------------------------------------------------------ */
+
+    /** The installed image, or null when there is none yet. */
+    private File guestImage() {
+        File f = new File(getFilesDir(), IMAGE_NAME);
+        return (f.exists() && f.length() > 0) ? f : null;
+    }
+
+    /** The release tag the installed image came from, or "" if unknown. */
+    private String installedImageVersion() {
+        return firstLine(new File(getFilesDir(), IMAGE_VERSION));
+    }
+
+    private void setInstalledImageVersion(String tag) throws IOException {
+        FileOutputStream f = new FileOutputStream(new File(getFilesDir(), IMAGE_VERSION));
+        f.write((tag + "\n").getBytes("UTF-8"));
+        f.close();
+    }
+
+    /** One published image: which release it is, what it should hash to, where. */
+    private static final class ImageRelease {
+        String tag;
+        String md5 = "";
+        long size;
+        String url = "";
+    }
+
+    /*
+     * Asked once per Activity start, and from Settings, always off the main
+     * thread: it is a network call, and its only product is deciding whether to
+     * show a dialog.
+     */
+    private void checkImageAsync(final boolean manual) {
+        new Thread(new Runnable() {
+            @Override public void run() { checkImage(manual); }
+        }, "umarm-image-check").start();
+    }
+
+    /**
+     * Compare the installed image with the newest published one and offer the
+     * download when they differ. manual is the Settings entry, which reports the
+     * outcome rather than staying quiet when there is nothing to do.
+     */
+    private void checkImage(final boolean manual) {
+        final ImageRelease rel;
+        try {
+            rel = fetchLatestRelease();
+        } catch (Exception e) {
+            log("image check failed: " + e + "\n");
+            if (manual) post("could not check for a new image: " + e);
+            return;
+        }
+        if (rel == null) {
+            if (manual) post("no guest image is published yet");
+            return;
+        }
+
+        final boolean present = guestImage() != null;
+        if (present && rel.tag.equals(installedImageVersion())) {
+            if (manual) post("the guest image is up to date (" + rel.tag + ")");
+            return;
+        }
+        /*
+         * "Keep" means keep this one: remembered for that version, so the
+         * question is asked once per image and the Settings entry can ask again.
+         */
+        if (!manual && rel.tag.equals(prefs.getString(IMAGE_SKIPPED, "")))
+            return;
+        ui.post(new Runnable() {
+            @Override public void run() { askImage(rel, present); }
+        });
+    }
+
+    /** The newest rootfs-* release, with the manifest carried in its body. */
+    private ImageRelease fetchLatestRelease() throws IOException, JSONException {
+        JSONArray releases = new JSONArray(httpGet(RELEASES_API, 20000));
+        for (int i = 0; i < releases.length(); i++) {
+            JSONObject r = releases.getJSONObject(i);
+            String tag = r.optString("tag_name", "");
+            if (!tag.startsWith(IMAGE_TAG_PREFIX))
+                continue;
+
+            ImageRelease out = new ImageRelease();
+            out.tag = tag;
+            try {
+                JSONObject m = new JSONObject(r.optString("body", ""));
+                out.md5 = m.optString("md5", "");
+                out.size = m.optLong("size", 0);
+            } catch (JSONException e) {
+                /* Not the manifest: the download is still offered, the hash check
+                 * is skipped, and the size comes from the HTTP response. */
+                log("release " + tag + " has no image manifest in its body\n");
+            }
+            JSONArray assets = r.optJSONArray("assets");
+            for (int j = 0; assets != null && j < assets.length(); j++) {
+                JSONObject a = assets.getJSONObject(j);
+                if (IMAGE_ASSET.equals(a.optString("name", ""))) {
+                    out.url = a.optString("browser_download_url", "");
+                    if (out.size <= 0) out.size = a.optLong("size", 0);
+                }
+            }
+            if (out.url.length() > 0)
+                return out;
+        }
+        return null;
+    }
+
+    private void askImage(final ImageRelease rel, final boolean present) {
+        long mb = rel.size > 0 ? rel.size >> 20 : 0;
+        StringBuilder m = new StringBuilder();
+        if (present) {
+            m.append("There is a newer guest image (").append(rel.tag);
+            if (mb > 0) m.append(", ").append(mb).append(" MB");
+            m.append(").\n\nReinstalling starts the guest from the new one. Files "
+                    + "you saved inside the guest and images you pulled with docker "
+                    + "live on the old one and are lost.");
+        } else {
+            m.append("The guest image has to be downloaded once");
+            if (mb > 0) m.append(" (").append(mb).append(" MB)");
+            m.append("; the APK does not carry it.\n\nIt is what makes the guest "
+                    + "Alpine with docker and a real shell. Without it the app boots "
+                    + "a small rescue shell instead.");
+        }
+        new AlertDialog.Builder(this)
+                .setTitle(present ? "New guest image" : "Guest image")
+                .setMessage(m.toString())
+                .setPositiveButton(present ? "Reinstall" : "Download",
+                        new DialogInterface.OnClickListener() {
+                            @Override public void onClick(DialogInterface d, int which) {
+                                downloadImage(rel);
+                            }
+                        })
+                .setNegativeButton(present ? "Keep" : "Not now",
+                        new DialogInterface.OnClickListener() {
+                            @Override public void onClick(DialogInterface d, int which) {
+                                if (present)
+                                    prefs.edit().putString(IMAGE_SKIPPED, rel.tag).apply();
+                            }
+                        })
+                .show();
+    }
+
+    /*
+     * Download, verify and install. The modal cannot be dismissed by tapping
+     * outside: a cancelled download is a temp file, but the install replaces a
+     * 1 GiB image, and the guest may not be running while it happens.
+     */
+    private void downloadImage(final ImageRelease rel) {
+        if (isGuestRunning()) {
+            toast("stop the guest first");
+            return;
+        }
+        final ProgressBar bar = new ProgressBar(this, null,
+                android.R.attr.progressBarStyleHorizontal);
+        bar.setMax(100);
+        final TextView label = new TextView(this);
+        label.setText("starting ...");
+        LinearLayout v = new LinearLayout(this);
+        v.setOrientation(LinearLayout.VERTICAL);
+        v.setPadding(32, 16, 32, 16);
+        v.addView(label);
+        v.addView(bar);
+        final AlertDialog dlg = new AlertDialog.Builder(this)
+                .setTitle("Guest image " + rel.tag)
+                .setView(v)
+                .setCancelable(false)
+                .create();
+        final boolean[] cancelled = { false };
+        dlg.setButton(DialogInterface.BUTTON_NEGATIVE, "Cancel",
+                new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface d, int which) {
+                        cancelled[0] = true;
+                    }
+                });
+        dlg.show();
+
+        new Thread(new Runnable() {
+            @Override public void run() {
+                runDownload(rel, bar, label, cancelled, dlg);
+            }
+        }, "umarm-image-download").start();
+    }
+
+    /*
+     * The thread body is a named method on purpose. An anonymous class declared
+     * inside the run() of another one is compiled to MainActivity$N$1, and d8
+     * 8.2 rejects that shape with an internal NullPointerException -- the note on
+     * logFile above is the same rule. Anonymous classes are only created in
+     * ordinary methods here.
+     */
+    private void runDownload(ImageRelease rel, ProgressBar bar, TextView label,
+            boolean[] cancelled, AlertDialog dlg) {
+        String err = null;
+        try {
+            downloadAndInstall(rel, bar, label, cancelled);
+        } catch (Exception e) {
+            err = e.toString();
+        }
+        finishDownload(dlg, rel, cancelled, err);
+    }
+
+    private void finishDownload(final AlertDialog dlg, final ImageRelease rel,
+            final boolean[] cancelled, final String err) {
+        ui.post(new Runnable() {
+            @Override public void run() {
+                dlg.dismiss();
+                if (err != null) {
+                    log("image download failed: " + err + "\n");
+                    toast("the image could not be installed: " + err);
+                } else if (cancelled[0]) {
+                    toast("cancelled");
+                } else {
+                    toast("guest image " + rel.tag + " installed -- Boot to use it");
+                }
+            }
+        });
+    }
+
+    private void downloadAndInstall(ImageRelease rel, ProgressBar bar, TextView label,
+            boolean[] cancelled) throws IOException {
+        File part = new File(getCacheDir(), IMAGE_ASSET + ".part");
+        MessageDigest digest;
+        try {
+            digest = MessageDigest.getInstance("MD5");
+        } catch (Exception e) {
+            digest = null;
+        }
+
+        HttpURLConnection c = (HttpURLConnection) new URL(rel.url).openConnection();
+        c.setInstanceFollowRedirects(true);
+        c.setConnectTimeout(20000);
+        c.setReadTimeout(60000);
+        c.setRequestProperty("User-Agent", "umarm");
+        c.setRequestProperty("Accept", "application/octet-stream");
+        try {
+            int code = c.getResponseCode();
+            if (code != 200)
+                throw new IOException("HTTP " + code + " from " + rel.url);
+            long total = c.getContentLength();
+            if (total <= 0) total = rel.size;
+
+            InputStream in = c.getInputStream();
+            FileOutputStream out = new FileOutputStream(part);
+            byte[] buf = new byte[1 << 16];
+            long done = 0, last = 0;
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                if (cancelled[0]) {
+                    in.close();
+                    out.close();
+                    part.delete();
+                    return;
+                }
+                out.write(buf, 0, n);
+                if (digest != null) digest.update(buf, 0, n);
+                done += n;
+                if (done - last >= (1 << 20)) {
+                    last = done;
+                    progress(bar, label, "downloading", done, total);
+                }
+            }
+            out.close();
+            in.close();
+            progress(bar, label, "verifying", done, total);
+
+            if (rel.md5.length() > 0 && digest != null) {
+                String got = hex(digest.digest());
+                if (!rel.md5.equalsIgnoreCase(got))
+                    throw new IOException("md5 mismatch (expected " + rel.md5
+                            + ", got " + got + ")");
+            }
+            installImage(part, rel.tag, bar, label);
+        } finally {
+            c.disconnect();
+        }
+    }
+
+    /** Unpack the downloaded archive onto the image the guest boots. */
+    private void installImage(File gz, String tag, ProgressBar bar, TextView label)
+            throws IOException {
+        File out = new File(getFilesDir(), IMAGE_NAME);
+        File neu = new File(getFilesDir(), IMAGE_NAME + ".new");
+
+        progress(bar, label, "unpacking", 0, 0);
+        InputStream in = new GZIPInputStream(new FileInputStream(gz), 65536);
+        FileOutputStream fos = new FileOutputStream(neu);
+        byte[] buf = new byte[1 << 16];
+        long total = 0;
+        int n;
+        while ((n = in.read(buf)) > 0) {
+            fos.write(buf, 0, n);
+            total += n;
+            progress(bar, label, "unpacking", total, 0);
+        }
+        fos.close();
+        in.close();
+
+        if (out.exists() && !out.delete())
+            throw new IOException("cannot replace " + out);
+        if (!neu.renameTo(out))
+            throw new IOException("cannot rename " + neu + " to " + out);
+
+        setInstalledImageVersion(tag);
+        /*
+         * A freshly installed image is a fresh install, and the guest's init
+         * reads this file to offer first-run setup -- it creates the non-root
+         * user and, from then on, logs in as it. Written here and not baked into
+         * the image so that the wizard is an app boot: the image the harness and
+         * the CI gates boot has no marker, and neither does the second boot,
+         * because the guest removes it.
+         */
+        File marker = new File(getFilesDir(), "first-run");
+        if (!marker.exists() && !marker.createNewFile())
+            log("cannot create the first-run marker; the guest boots as root\n");
+        gz.delete();
+        log("installed the guest image " + tag + " (" + (total >> 20) + " MB)\n");
+    }
+
+    /** Repaint the download dialog, at most once per megabyte. */
+    private void progress(final ProgressBar bar, final TextView label, final String what,
+            final long done, final long total) {
+        ui.post(new Runnable() {
+            @Override public void run() {
+                if (total > 0) bar.setProgress((int) (done * 100 / total));
+                label.setText(what + "  " + (done >> 20)
+                        + (total > 0 ? " / " + (total >> 20) : "") + " MB");
+            }
+        });
+    }
+
+    /** A small HTTPS GET: the releases API and the asset both answer to this. */
+    private String httpGet(String url, int timeoutMs) throws IOException {
+        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        c.setInstanceFollowRedirects(true);
+        c.setConnectTimeout(timeoutMs);
+        c.setReadTimeout(timeoutMs);
+        c.setRequestProperty("User-Agent", "umarm");
+        c.setRequestProperty("Accept", "application/vnd.github+json");
+        try {
+            int code = c.getResponseCode();
+            if (code != 200)
+                throw new IOException("HTTP " + code + " from " + url);
+            InputStream in = c.getInputStream();
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            in.close();
+            return new String(out.toByteArray(), "UTF-8");
+        } finally {
+            c.disconnect();
+        }
+    }
+
+    private static String hex(byte[] b) {
+        StringBuilder s = new StringBuilder(b.length * 2);
+        for (byte x : b) {
+            s.append(Character.forDigit((x >> 4) & 0xf, 16));
+            s.append(Character.forDigit(x & 0xf, 16));
+        }
+        return s.toString();
+    }
+
+    /** Toast from a background thread. */
+    private void post(final String s) {
+        ui.post(new Runnable() {
+            @Override public void run() { toast(s); }
+        });
     }
 
     /**

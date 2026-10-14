@@ -285,19 +285,43 @@ app is built without Gradle, so three adjustments are documented in that file:
 three `androidx.annotation` markers are stubbed, and two cosmetic drawables use
 a literal color instead of a Material theme attribute.
 
-The guest is now the same Alpine + Docker + OpenRC image `alpine-um` boots
-(`alpine-docker.ext4`, gzipped into `assets/rootfs.ext4.gz`), not just the small
-Alpine initramfs: the app unpacks it, boots `init=/umarm-init`, and the image's
-init brings up the network, openrc and dockerd before giving a login shell. The
-initramfs is still the fallback for a build without the image. Settings (RAM,
-seccomp, net, usb) moved into a menu; the terminal owns the screen, with an
-extra-keys row (Ctrl/Alt/Shift/Fn/Esc/Tab/arrows/`^C`/`^D`/paste) and the USB
-passthrough unchanged.
+The guest is the same Alpine + Docker + OpenRC image `alpine-um` boots
+(`alpine-docker.ext4`), not just the small Alpine initramfs: the app installs it,
+boots `init=/umarm-init`, and the image's init brings up the network, openrc and
+dockerd before giving a login shell. The initramfs is still the fallback for a
+guest with no image yet. Settings (RAM, seccomp, net, usb) moved into a menu; the
+terminal owns the screen, with an extra-keys row
+(Ctrl/Alt/Shift/Fn/Esc/Tab/arrows/`^C`/`^D`/paste) and the USB passthrough
+unchanged.
 
-The APK is large because it carries the image (a kernel plus a Docker guest);
-`harness/ci-umapp.sh` is the signature/manifest/contents check and now also
-asserts the terminal classes in `classes.dex`, the pty entry point in
-`libtermux.so`, and the rootfs asset.
+The APK is 153 MB and almost all of it is the kernel, which is the point of the
+app; `harness/ci-umapp.sh` is the signature/manifest/contents check and asserts
+the terminal classes in `classes.dex`, the pty entry point in `libtermux.so`, and
+the strings the image downloader needs.
+
+### The guest image is a release, not an APK asset
+
+The image used to be bundled: 144 MB gzipped into the APK, which made every app
+build 289 MB and made the APK the unit of versioning for something it does not
+own -- an image fix could reach a phone only through an app update, and an app
+update could reach the image only through `rootfs.revision`. It is a GitHub
+release asset now. When the image changes, the `publish` job (push to main only)
+creates a release tagged `rootfs-<date>-<run>-<attempt>` carrying
+`rootfs.ext4.gz` and `rootfs.json`, and publishes nothing when the bytes are the
+ones already there.
+
+The release *body* is the manifest, `{"version":…,"md5":…,"size":…}`, so one
+request to the releases API tells the app both what the newest image is and what
+it should hash to. Every start the app asks, compares the tag with the one
+recorded in `rootfs.version`, and offers a download only when they differ.
+"Keep" remembers that version (`skipped-image`), so the question is asked once
+per image, and Settings has an entry that asks again on purpose. The download
+goes into the app's own cache and files directories: a temp file in cache, an md5
+check, then a gunzip into `rootfs.ext4.new` and a rename over `rootfs.ext4`, so
+the image the guest is booting is never half-written. A fresh image is a fresh
+install, so the same `first-run` marker is written and the wizard runs. A build
+can still bake an image in with `ROOTFS_GZ` for a run with no network, and
+`ci-umapp.sh` accepts either shape.
 
 ### The console: a controlling tty, and a first-run user
 
@@ -328,12 +352,10 @@ with `permit nopass :wheel`, because the minirootfs ships no setuid busybox and
 a non-root user has no other way to reach root.
 
 On the first app boot the guest offers to create that user: the app writes
-`first-run` into its files directory when it unpacks the image, `umarm-init`
+`first-run` into its files directory when it installs the image, `umarm-init`
 turns it into a wizard (username, password, optional root password), adds the
 user to `wheel` and `docker`, records it in `/var/lib/umarm/user`, and from then
 on logs in as it. The marker is written by the app and removed by the guest, so
-the harness and the gates boot the image unchanged and as root. An app update
-replaces the image when it changes: the revision that was unpacked is kept in
-`rootfs.revision`, and a build whose revision differs unpacks the new image and
-runs the wizard again -- without that the fixed file name would keep the first
-image forever and an image fix would only reach a fresh install.
+the harness and the gates boot the image unchanged and as root, and neither the
+second boot nor a freshly installed image has it. Reinstalling an image runs the
+wizard again, because a fresh image is a fresh install.

@@ -12,7 +12,9 @@
 #     the app's data directory cannot be executed from, and an ELF for the wrong
 #     architecture or a dynamic one would only show up as a failure to exec;
 #   * the assets the app reads at startup are present, including the initramfs
-#     without which the kernel has nothing to boot;
+#     without which the kernel has nothing to boot, and -- when the APK ships no
+#     guest image, which is the normal case -- that the release URL the app will
+#     download one from is in the dex;
 #   * the manifest says what the app needs to say: the package name, an SDK range
 #     the binaries can run in, and the USB device filter that makes the
 #     passthrough attach prompt appear.
@@ -94,7 +96,6 @@ for entry in classes.dex \
              lib/arm64-v8a/libprobe.so lib/arm64-v8a/libappseccomp.so \
              lib/arm64-v8a/libumusb.so \
              assets/initramfs.cpio.gz \
-             assets/rootfs.ext4.gz \
              res/xml/device_filter.xml; do
     if printf '%s\n' "$list" | grep -q " $entry\$"; then
         size=$(printf '%s\n' "$list" | awk -v e="$entry" '$NF == e { print $1 }')
@@ -103,6 +104,20 @@ for entry in classes.dex \
         bad "$entry is missing from the APK"
     fi
 done
+
+# The guest image is not bundled any more: it is a release asset the app
+# downloads. A build may still carry one (ROOTFS_GZ), and then it has to be a
+# gzip; when it does not, what has to be there instead is the downloader, checked
+# below against the dex.
+if printf '%s\n' "$list" | grep -q " assets/rootfs.ext4.gz\$"; then
+    if unzip -p "$APK" assets/rootfs.ext4.gz 2>/dev/null | gzip -t 2>/dev/null; then
+        ok "the bundled guest image is a gzip archive"
+    else
+        bad "the bundled guest image is not a gzip archive"
+    fi
+else
+    ok "no guest image is bundled (the app downloads it)"
+fi
 
 # The kernel is the point of the app, so it gets the same check the kernel
 # artifact gets: an aarch64 ELF with no interpreter. A lib*.so that is a dynamic
@@ -162,6 +177,21 @@ for cls in com/termux/view/TerminalView \
         bad "classes.dex does not contain $cls"
     fi
 done
+
+# The image downloader is what replaces the bundled image, so the strings that
+# make it work have to survive the dex: the API it asks, the asset name it looks
+# for in the release, and the fields it reads out of the release JSON. A dex that
+# lost them would still install and boot the initramfs, and never get a guest.
+if unzip -p "$APK" classes.dex > "$tmp/dex" 2>/dev/null; then
+    for s in "api.github.com/repos/Leonisaurov/linux-um-arm64/releases" \
+             "rootfs.ext4.gz" "browser_download_url" "tag_name"; do
+        if grep -aq "$s" "$tmp/dex"; then
+            ok "classes.dex carries the image-download string $s"
+        else
+            bad "classes.dex is missing the image-download string $s"
+        fi
+    done
+fi
 
 echo "checks=$CHECKS failed=$FAILED"
 [ "$FAILED" = 0 ] && echo "verdict=PASS" || echo "verdict=FAIL"

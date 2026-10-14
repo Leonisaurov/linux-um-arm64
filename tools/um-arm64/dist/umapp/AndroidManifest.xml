@@ -12,11 +12,17 @@
   android:extractNativeLibs="true" matters for the same reason: the binaries
   have to exist as real files on disk to be exec'd, not mapped straight out of
   a compressed APK.
+
+  The guest image is deliberately *not* in here. It is 144 MB gzipped, it is
+  rebuilt whenever Alpine or the guest scripts change, and none of that has
+  anything to do with this code, so it is a release asset the app downloads
+  once and compares against on every start (RELEASES_API in MainActivity),
+  instead of something whose version was the APK's.
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="org.umarm.debian"
-    android:versionCode="1"
-    android:versionName="0.1">
+    android:versionCode="2"
+    android:versionName="0.2">
 
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
 
