@@ -1,3 +1,0 @@
-#!/bin/sh
-echo "GATE3_FAIL: exec /bin/true, iteration 16"
-exit 1

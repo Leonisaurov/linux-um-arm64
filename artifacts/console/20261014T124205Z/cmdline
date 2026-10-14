@@ -1,1 +1,0 @@
-ubd0=/data/data/com.termux/files/home/Develop/um-rss/alpine-um/alpine.ext4 root=/dev/ubda stub_exe=/data/data/com.termux/files/home/Develop/um-rss/alpine-um/stub_exe mem=512M panic=-1 init=/console-init con=null con0=null,fd:1 rw

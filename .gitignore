@@ -202,3 +202,8 @@ sphinx_*/
 
 # bc language scripts (not LLVM bitcode)
 !kernel/time/timeconst.bc
+
+# Boot-gate run output. harness/native.sh defaults ART to <root>/artifacts and
+# writes each run's log, cmdline and a copy of the kernel there; it is evidence,
+# not source, and one run's kernel alone is 12 MB.
+/artifacts/

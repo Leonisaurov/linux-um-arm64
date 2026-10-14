@@ -1,1 +1,0 @@
-mem=512M panic=-1 init=/bin/sh con=/dev/null con0=null,fd:1 
