@@ -42,7 +42,14 @@ guestinit)
           -o "$TMP/init" "$HERE/probe/guestinit.c"
 
     INIT="$TMP/init" OUT="$OUT" python3 - <<'PY'
-import os, struct, sys, time
+import os, struct, sys
+
+# Every header's mtime is a constant, not the time of the build. This archive is
+# an input to the APK's identity -- build-apk.sh hashes it -- so a timestamp here
+# would give every run a different identity, and every installed app would be
+# offered an update to a build that differs only in when it was made. The
+# `gzip -9n` at the end is the other half of the same rule.
+MTIME = 0
 
 init = os.environ["INIT"]
 out = os.environ["OUT"]
@@ -61,7 +68,7 @@ def entry(name, mode, body):
             mode,         # mode
             0, 0,         # uid, gid
             1,            # nlink
-            int(time.time()),  # mtime
+            MTIME,        # mtime
             len(body),    # filesize
             0, 0,         # devmajor, devminor
             0, 0,         # rdevmajor, rdevminor
@@ -99,7 +106,11 @@ alpine)
     install -m 0755 "$HERE/initrd/alpine-init" "$ROOT/init"
 
     ROOT="$ROOT" OUT="$OUT" python3 - <<'PY'
-import os, stat, struct, sys, time
+import os, stat, struct, sys
+
+# As above: the time of the build is not part of the build, and this archive's
+# bytes are part of the APK's identity.
+MTIME = 0
 
 root = os.environ["ROOT"]
 out = os.environ["OUT"]
@@ -113,7 +124,7 @@ def entry(name, mode, body=b"", nlink=1):
             mode,         # mode
             0, 0,         # uid, gid
             nlink,        # nlink
-            int(time.time()),  # mtime
+            MTIME,        # mtime
             len(body),    # filesize
             0, 0,         # devmajor, devminor
             0, 0,         # rdevmajor, rdevminor
