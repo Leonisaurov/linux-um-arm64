@@ -113,8 +113,26 @@ mitades, y cada una tiene que hacer su parte:
   `getFilesDir().getUsableSpace()` alcance.
 - **La UI**: el drawer tiene `Grow disks…` en la sección **Data**, con un campo
   por disco en GiB y una línea con lo que ocupan hoy y el espacio libre. Guardar
-  persiste los dos tamaños y llama a `applyDesiredSizes()`; el guest los aplica
-  en el arranque siguiente.
+  persiste los dos tamaños y llama a `applyDesiredSizes()`, que responde **una
+  cláusula por disco** (`base: 1.0 -> 1.5 GiB; data: already 2.0 GiB`) y esa
+  respuesta es lo que muestra el toast. El guest aplica los tamaños en el
+  arranque siguiente.
+- **Un no-op no es un fallo**: `growFile()` devolvía `false` también cuando el
+  archivo *ya* medía lo pedido, así que aceptar los valores precargados del
+  diálogo —la base de una release mide exactamente 1 GiB y el campo se
+  precargaba con `1`— respondía `could not grow; see the log` sin que nada
+  hubiera fallado, y sin una línea en el log, porque no se había intentado nada.
+  Ahora `growOne()` distingue los tres estados (creció / ya estaba / no pudo),
+  los nombra en el toast y escribe siempre la línea correspondiente. El campo se
+  precarga con los GiB **redondeados hacia arriba** sobre el máximo de lo pedido
+  y lo que el archivo mide, para no ofrecer nunca un número que encoja.
+- **El log, en pantalla**: todo lo que explica un fallo (por qué un disco no
+  creció, qué dijo el instalador, por qué se cayó una verificación de imagen) se
+  escribe en `getFilesDir()/boot.log`, y a ese directorio ni un administrador de
+  archivos ni otra app llegan sin root. Un toast que dice «mirá el log» mandaba
+  entonces a una puerta sin puerta. El drawer tiene **Show the log…**, que
+  muestra el final del archivo, lo copia al portapapeles y deja una copia junto a
+  los backups, en `getExternalFilesDir(null)`, que un cable sí ve.
 - **El gate**: `harness/guest/grow-init` más `harness/growfs.sh`, que arranca la
   misma imagen dos veces con el mismo disco de datos —256 MiB y después 768 MiB,
   y la base de 1 GiB a 1,5 GiB— y exige que el segundo arranque reporte más
@@ -160,9 +178,42 @@ ella; y el asistente no vuelve a correr. El disco quedó comprobado además con
 `debugfs` desde el host. El gate `data` de CI pasa en la misma corrida
 (`UMARM_VERDICT=PASS`).
 
-Lo que **no** está verificado en un dispositivo: la UI del APK (Back up, Restore,
-Export, Import) y un arranque real de la app con el disco de datos. El APK
-compila, `harness/ci-umapp.sh` comprueba que las cadenas estén en el dex y que
+Lo que **no** estaba verificado en un dispositivo: la UI del APK (Back up,
+Restore, Export, Import) y un arranque real de la app con el disco de datos. El
+APK compila, `harness/ci-umapp.sh` comprueba que las cadenas estén en el dex y que
 la firma y el manifiesto sigan bien, y el camino del guest es el mismo que sí se
-verificó acá -- pero la primera corrida en el teléfono queda pendiente, anotada
-en `PENDIENTES.md`, «Sin probar».
+verificó acá -- pero la primera corrida en el teléfono quedó anotada en
+`PENDIENTES.md`, «Sin probar», y cuando se corrió encontró el bug de arriba: el
+diálogo declaraba «no pudo» un intento que no tenía nada que hacer.
+
+## Crecer y el espacio real, medidos
+
+La mitad del guest se probó contra la imagen **publicada** (`rootfs-20261015-90-1`,
+la que baja la app), no contra una copia vieja de desarrollo: se le alargó el
+archivo de 1 GiB a 1.5 GiB con `truncate` --exactamente lo que hace
+`RandomAccessFile.setLength()`-- y el arranque siguiente trajo la base ya agrandada:
+
+    antes:  /dev/root  973.4M  (archivo de 1073741824)
+    despues: /dev/root   1.4G  blockdev /dev/ubda = 1610612736
+            /dev/ubdb = 2147483648 -> df /data = 1.9G
+
+O sea: `resize2fs` online sobre `/` montado, y el disco de datos formateado y
+crecido en el mismo arranque. La imagen de desarrollo de `~/Develop/um-rss` es
+anterior al feature y **no** tiene `/umarm-growfs.sh` ni `resize2fs`: comprobar
+sobre ella daría un falso negativo.
+
+Por qué todo esto importa en la práctica: `opencode` corre en el guest
+(`1.19.0` responde a `--version` sobre el kernel de este port), pero su asset de
+Alpine es `opencode-linux-arm64-musl.tar.gz` = 59.7 MiB comprimidos y
+**194.752.376 bytes** (185.8 MiB) de binario una vez desarrollado. La imagen
+recién instalada arranca con 554.9 MiB libres en `/`, así que instalarlo entra
+justo y deja ~180 MiB: un `apk add` más, o los datos todavía en la base en vez
+del disco de datos, y el `ENOSPC` es inmediato -- que es lo que la app no puede
+arreglar sola: agrandar el archivo es mitad del camino, y la otra mitad es que el
+guest tenga dónde escribir.
+
+Dos detalles del instalador oficial, para no confundirlos con un fallo del port:
+`https://opencode.ai/install` muere en su línea 380 con `SHELL: parameter not
+set` (el guest no exporta `$SHELL` y Alpine no trae `bash`), y deja los ~60 MiB
+descargados sin instalar el binario. Bajar el asset y desarrollarlo en
+`/usr/local/bin` funciona.

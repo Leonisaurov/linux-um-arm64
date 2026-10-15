@@ -299,6 +299,20 @@ de `console-init` también hace que la causa no pueda volver a pasar inadvertida
   `ci-umapp.sh`, pero las entradas *Back up*/*Restore*/*Export*/*Import* y
   *Grow disks…* del drawer no se corrieron en un dispositivo todavía, ni se vio
   el anillo rojo del handle con el guest apagado. Ver `doc/85-data-disk.md`.
+  La primera corrida en el teléfono encontró un bug de verdad y ya está
+  arreglado, pero **el arreglo tampoco se vio en el dispositivo**: el diálogo
+  precargaba la base de 1 GiB con `1`, y `growFile()` devolvía `false` también
+  para «ya mide esto», así que aceptar el valor precargado respondía
+  `could not grow; see the log` sin haber fallado nada. Hoy `growOne()`
+  distingue creció / ya estaba / no pudo, lo dice por disco, y lo loguea siempre;
+  el texto del toast y las tres ramas están probadas extrayendo el método tal
+  cual del fuente y corriéndolo en la JVM contra archivos reales de 1 y 2 GiB
+  (`GROWLOGIC_OK`), que no es lo mismo que haberlo tocado en la pantalla.
+- **`Show the log…` del drawer**: mismo estado. Existe porque los mensajes
+  mandaban a leer `getFilesDir()/boot.log`, adonde sin root no se llega; la
+  pantalla, el copiado al portapapeles y la copia en `getExternalFilesDir(null)`
+  están compilados y `ci-umapp.sh` exige que las tres cadenas sigan en el dex,
+  pero nadie las abrió todavía.
 
 ## CI
 
