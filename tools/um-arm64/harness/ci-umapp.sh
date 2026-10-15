@@ -255,6 +255,21 @@ if unzip -p "$APK" classes.dex > "$tmp/dex" 2>/dev/null; then
     done
 fi
 
+# Growing a disk is two halves, and the app's half is the one that can lie: it
+# either says which disk moved or it says nothing at all. These two strings are
+# what the Grow dialog reports now -- a per-disk clause and the reboot it still
+# owes -- and the log the failure messages point the user at has to be reachable
+# from the drawer, or "see the log" is a direction to a place with no door.
+if unzip -p "$APK" classes.dex > "$tmp/dex" 2>/dev/null; then
+    for s in "boot.log" "Show the log" "reboot the guest to resize the filesystem"; do
+        if grep -aq "$s" "$tmp/dex"; then
+            ok "classes.dex carries the grow-and-log string $s"
+        else
+            bad "classes.dex is missing the grow-and-log string $s"
+        fi
+    done
+fi
+
 # The same, for the half that updates the app itself: the provider the installer
 # reads through, the authority it is reached by, the MIME type the installer
 # matches on, and the manifest key the recipe is read from.

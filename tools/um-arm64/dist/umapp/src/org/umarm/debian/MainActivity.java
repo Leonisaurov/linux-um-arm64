@@ -167,6 +167,13 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
     private static final String BACKUP_SUFFIX = ".ext4.gz";
     /* How many automatic/manual backups to keep before the oldest is dropped. */
     private static final int BACKUPS_KEPT = 3;
+    /*
+     * The app's own record, and how much of it the viewer reads. The file lives
+     * in getFilesDir(), which nothing outside the app can reach, so it needs a
+     * way onto the screen -- see showBootLog().
+     */
+    private static final String LOG_NAME = "boot.log";
+    private static final long LOG_TAIL = 256L << 10;
 
     /*
      * The app's own releases, tagged with the recipe digest build-apk.sh bakes
@@ -464,6 +471,9 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         drawerSection(v, "More");
         settingsItem = drawerItem(v, "Settings", new View.OnClickListener() {
             @Override public void onClick(View w) { closeDrawer(); showSettings(); }
+        });
+        drawerItem(v, "Show the log\u2026", new View.OnClickListener() {
+            @Override public void onClick(View w) { closeDrawer(); showBootLog(); }
         });
 
         return scroll;
@@ -1165,10 +1175,11 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
 
         final File data = new File(getFilesDir(), DATA_NAME);
         final File base = new File(getFilesDir(), IMAGE_NAME);
-        long dataGiB = Math.max(1, desiredDataSize() >> 30);
-        long baseGiB = desiredBaseSize() > 0
-                ? desiredBaseSize() >> 30
-                : (base.exists() ? base.length() >> 30 : 1);
+        /* Rounded up, and up over the larger of "asked for" and "what the file
+         * is": flooring a 1.5 GiB disk to 1 prefill a field that silently asked
+         * for a shrink, which this does not do. */
+        long dataGiB = ceilGiB(Math.max(desiredDataSize(), data.length()));
+        long baseGiB = ceilGiB(Math.max(desiredBaseSize(), base.length()));
 
         LinearLayout v = new LinearLayout(this);
         v.setOrientation(LinearLayout.VERTICAL);
@@ -1190,7 +1201,9 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         note.setText("Sizes in GiB. Disks only ever grow. The guest grows the "
                 + "filesystem on its next boot.\n\nNow: data "
                 + (data.length() >> 20) + " MB, base " + (base.length() >> 20)
-                + " MB. Free: " + (getFilesDir().getUsableSpace() >> 20) + " MB.");
+                + " MB. Free: " + (getFilesDir().getUsableSpace() >> 20) + " MB."
+                + "\n\nEach disk's result is the text the toast shows, and it is "
+                + "written to the log: drawer > Show the log\u2026");
         v.addView(note);
 
         ScrollView scroll = new ScrollView(this);
@@ -1207,9 +1220,9 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
                                 .putLong(PREF_DATA_SIZE, gb << 30)
                                 .putLong(PREF_BASE_SIZE, bb << 30)
                                 .apply();
-                        boolean ok = applyDesiredSizes();
-                        toast(ok ? "grown -- reboot the guest to resize the filesystem"
-                                 : "could not grow; see the log");
+                        String report = applyDesiredSizes();
+                        log("grow disks -> " + report + "\n");
+                        toast(report);
                     }
                 })
                 .setNegativeButton("Cancel", null)
@@ -1219,6 +1232,12 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
     private static long parseGiB(String s) {
         try { return Math.max(0, Long.parseLong(s.trim())); }
         catch (NumberFormatException e) { return 0; }
+    }
+
+    /** Bytes to whole GiB, rounded up: a disk never shrinks, so the number
+     *  offered must never be less than what the file already is. */
+    private static long ceilGiB(long bytes) {
+        return (bytes + (1L << 30) - 1) >> 30;
     }
 
     /*
@@ -1558,11 +1577,114 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
     private void log(String s) {
         try {
             if (logFile == null)
-                logFile = new FileOutputStream(new File(getFilesDir(), "boot.log"), true);
+                logFile = new FileOutputStream(new File(getFilesDir(), LOG_NAME), true);
             logFile.write(s.getBytes("UTF-8"));
             logFile.flush();
         } catch (Exception e) {
             /* Never let logging break the boot it is meant to record. */
+        }
+    }
+
+    /**
+     * The log, on screen. What explains a failure -- why a disk would not grow,
+     * what the installer said, why an image check stopped -- is written to
+     * getFilesDir(), and on Android no file manager and no other app reaches that
+     * without root. So telling someone to "see the log" sent them somewhere they
+     * could not go. This shows the end of the file and gives two ways off the
+     * phone: the clipboard, and a copy beside the backups, which a cable does see.
+     */
+    private void showBootLog() {
+        final File f = new File(getFilesDir(), LOG_NAME);
+        final String body = readTail(f, LOG_TAIL);
+        String head = f.getAbsolutePath() + "  (" + (f.length() >> 10) + " KB)\n\n";
+
+        TextView text = new TextView(this);
+        text.setTypeface(Typeface.MONOSPACE, Typeface.NORMAL);
+        text.setTextSize(11);
+        text.setTextIsSelectable(true);
+        text.setPadding(dp(12), dp(8), dp(12), dp(8));
+        text.setText(head + body);
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(text);
+
+        new AlertDialog.Builder(this)
+                .setTitle("The app's log")
+                .setView(scroll)
+                .setPositiveButton("Copy", new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface d, int which) {
+                        copyToClipboard(body);
+                    }
+                })
+                .setNeutralButton("Save a copy", new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface d, int which) {
+                        saveLogCopy(f);
+                    }
+                })
+                .setNegativeButton("Close", null)
+                .show();
+    }
+
+    /**
+     * The last `max` bytes of a file. The log is append-only and never trimmed,
+     * and the part that explains a failure is at the end; saying so on screen is
+     * better than showing a truncated tail without a word about it.
+     */
+    private static String readTail(File f, long max) {
+        if (!f.exists()) return "(no log yet: " + f.getAbsolutePath() + ")\n";
+        RandomAccessFile raf = null;
+        try {
+            raf = new RandomAccessFile(f, "r");
+            long len = raf.length();
+            long from = Math.max(0, len - max);
+            raf.seek(from);
+            byte[] buf = new byte[(int) (len - from)];
+            int got = 0;
+            while (got < buf.length) {
+                int n = raf.read(buf, got, buf.length - got);
+                if (n <= 0) break;
+                got += n;
+            }
+            String cut = from > 0
+                    ? ("... " + (from >> 10) + " KB earlier, not shown ...\n") : "";
+            return cut + new String(buf, 0, got, "UTF-8");
+        } catch (Exception e) {
+            return "(cannot read " + f.getName() + ": " + e + ")\n";
+        } finally {
+            if (raf != null) try { raf.close(); } catch (IOException e) { }
+        }
+    }
+
+    private void copyToClipboard(String s) {
+        ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        if (cm == null) { toast("no clipboard here"); return; }
+        cm.setPrimaryClip(ClipData.newPlainText("umarm log", s));
+        toast("copied " + (s.length() >> 10) + " KB to the clipboard");
+    }
+
+    /**
+     * Copy the log where a cable can reach it -- the same external directory the
+     * backups use. With no external storage the private directory is all there
+     * is, so the toast prints the path it actually wrote.
+     */
+    private void saveLogCopy(File src) {
+        File dir = getExternalFilesDir(null);
+        if (dir == null) dir = getFilesDir();
+        File out = new File(dir, "boot-" + stamp() + ".log");
+        InputStream in = null;
+        OutputStream os = null;
+        try {
+            in = new FileInputStream(src);
+            os = new FileOutputStream(out);
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) os.write(buf, 0, n);
+            toast("saved to " + out.getAbsolutePath());
+        } catch (Exception e) {
+            toast("could not save the log: " + e);
+        } finally {
+            if (in != null) try { in.close(); } catch (IOException e) { }
+            if (os != null) try { os.close(); } catch (IOException e) { }
         }
     }
 
@@ -1669,35 +1791,67 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
     }
 
     /**
-     * Grow a sparse file to at least `target` bytes. A larger sparse file costs
-     * no space until it is written, so this is only refused when the file
-     * cannot be extended at all. Never shrinks: an ext4 shrunk from this side
-     * would be a filesystem with blocks past its end.
+     * Grow a sparse file to at least `target` bytes, and say what happened in
+     * the words the toast shows. A larger sparse file costs no space until it is
+     * written, so this is only refused when the file cannot be extended at all.
+     * Never shrinks: an ext4 shrunk from this side would be a filesystem with
+     * blocks past its end.
+     *
+     * A target the file already meets is not a failure -- it is the state the
+     * user asked for, reached without touching anything. Reporting it as one
+     * made the dialog answer "could not grow" to a press that had nothing to do,
+     * and send the user to a log that could not mention it, because nothing was
+     * attempted and so nothing was written.
      */
-    private boolean growFile(File f, long target) {
-        if (f == null || !f.exists() || target <= f.length()) return false;
-        RandomAccessFile raf = null;
-        try {
-            raf = new RandomAccessFile(f, "rw");
-            raf.setLength(target);
-            log("grew " + f.getName() + " to " + (target >> 30) + " GiB\n");
-            return true;
-        } catch (Exception e) {
-            log("cannot grow " + f + ": " + e + "\n");
-            return false;
-        } finally {
-            if (raf != null) try { raf.close(); } catch (IOException e) { }
+    private String growOne(String label, File f, long target) {
+        String clause;
+        if (f == null || !f.exists()) {
+            clause = label + ": no file yet";
+        } else if (target <= 0) {
+            clause = label + ": no size asked for";
+        } else if (target <= f.length()) {
+            clause = label + ": already " + giB(f.length()) + " GiB";
+        } else {
+            long was = f.length();
+            RandomAccessFile raf = null;
+            try {
+                raf = new RandomAccessFile(f, "rw");
+                raf.setLength(target);
+                clause = label + ": " + giB(was) + " -> " + giB(target) + " GiB";
+            } catch (Exception e) {
+                clause = label + ": COULD NOT GROW (" + e + ")";
+            } finally {
+                if (raf != null) try { raf.close(); } catch (IOException e) { }
+            }
         }
+        log("grow " + clause + " (asked " + (target >> 20) + " MB)\n");
+        return clause;
     }
 
-    /** Apply both desired sizes; false when either failed. */
-    private boolean applyDesiredSizes() {
-        boolean ok = true;
-        if (guestData() != null) ok &= growFile(guestData(), desiredDataSize());
-        File base = guestImage();
-        if (base != null && desiredBaseSize() > 0)
-            ok &= growFile(base, desiredBaseSize());
-        return ok;
+    /** GiB with one decimal, so the answer is comparable with the field. */
+    private static String giB(long bytes) {
+        return String.format(Locale.US, "%.1f", bytes / 1073741824.0);
+    }
+
+    /**
+     * Apply both desired sizes, one clause per disk. Telling the two apart
+     * matters: with a single boolean over two files, a disk that was already the
+     * size asked for made the other one's success read as a failure.
+     */
+    private String applyDesiredSizes() {
+        final File data = guestData();
+        final File base = guestImage();
+        long dataWas = data == null ? 0 : data.length();
+        long baseWas = base == null ? 0 : base.length();
+        StringBuilder b = new StringBuilder();
+        b.append(growOne("data", data, desiredDataSize()));
+        b.append("; ").append(growOne("base", base, desiredBaseSize()));
+        /* file.length() is read again here on purpose: the grow is finished and
+         * closed, so a longer file is the evidence something actually moved. */
+        if ((data != null && data.length() > dataWas)
+                || (base != null && base.length() > baseWas))
+            b.append(" -- reboot the guest to resize the filesystem");
+        return b.toString();
     }
 
     /**
@@ -2640,7 +2794,7 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
          * property of the file, so it is applied again here -- grow-only, so a
          * release that shipped larger is left alone.
          */
-        if (desiredBaseSize() > 0) growFile(out, desiredBaseSize());
+        if (desiredBaseSize() > 0) growOne("base", out, desiredBaseSize());
         /*
          * A freshly installed image is a fresh install, and the guest's init
          * reads this file to offer first-run setup -- it creates the non-root
