@@ -34,7 +34,11 @@
 # this script starts it whether or not the service system works. See
 # doc/80-docker-alpine.md.
 
-PATH=/sbin:/usr/sbin:/bin:/usr/bin
+# Alpine's own default, with /usr/local first: installers that put a binary in
+# /usr/local/bin -- opencode's does, and `tar -x` into it is how anything
+# non-apk lands here -- were otherwise invisible by name, "not found" next to a
+# file that exists and runs.
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/usr/sbin:/bin:/usr/bin
 export PATH
 
 log() { echo "umarm-init: $*"; }
@@ -277,7 +281,10 @@ cat > /run/umarm-console <<'UMARM_CONSOLE_EOF'
 # is the console tty (see /umarm-init), so job control, ^C and window-size
 # changes work. BSD-style `login -f` would be another way to seed the session;
 # this keeps the setup where the image can be read.
-PATH=/sbin:/usr/sbin:/bin:/usr/bin
+# Same PATH as /umarm-init and for the same reason: this is the shell a person
+# types in, and a binary in /usr/local/bin that "does not exist" is the worst
+# kind of lie.
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/usr/sbin:/bin:/usr/bin
 export PATH
 
 echo "umarm: Alpine $(cat /etc/alpine-release 2>/dev/null) $(uname -m) on $(uname -sr)"
