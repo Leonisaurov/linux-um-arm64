@@ -1578,8 +1578,14 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         }
         if (!manual && rel.version.equals(prefs.getString(APP_SKIPPED, "")))
             return false;
+        /*
+         * Whether the APK already in the cache is *this* release is decided
+         * here and not in the dialog: it reads and hashes the file, and this
+         * runs on the check's own thread while the dialog runs on the UI one.
+         */
+        final boolean have = cachedAppUpdate(rel);
         ui.post(new Runnable() {
-            @Override public void run() { askAppUpdate(rel); }
+            @Override public void run() { askAppUpdate(rel, have); }
         });
         return true;
     }
@@ -1672,9 +1678,8 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
                 .show();
     }
 
-    private void askAppUpdate(final Release rel) {
+    private void askAppUpdate(final Release rel, final boolean have) {
         final File apk = new File(getCacheDir(), ApkProvider.NAME);
-        final boolean have = apk.exists() && rel.size > 0 && apk.length() == rel.size;
         long mb = rel.size > 0 ? rel.size >> 20 : 0;
         StringBuilder m = new StringBuilder();
         m.append("umarm ").append(rel.version).append(" is available");
@@ -1696,6 +1701,49 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
                     }
                 })
                 .show();
+    }
+
+    /**
+     * Is the APK in the cache the one this release offers?
+     *
+     * The file's length alone cannot answer that. build-apk.sh's output has
+     * landed on the same byte count for several consecutive recipes -- five
+     * umarm-* releases all weighed 27735863 bytes, with different md5s -- so a
+     * cached file from one release made the next one of that size look already
+     * downloaded, and the package installer was handed the old build instead
+     * of the new one being fetched. The md5 in the release manifest is what
+     * names the bytes, so that is what decides. A release whose body is not a
+     * manifest has no md5 to compare, and there the size is all there is.
+     */
+    private boolean cachedAppUpdate(Release rel) {
+        File apk = new File(getCacheDir(), ApkProvider.NAME);
+        if (!apk.exists() || apk.length() == 0)
+            return false;
+        if (rel.md5.length() == 0)
+            return rel.size > 0 && apk.length() == rel.size;
+        return rel.md5.equalsIgnoreCase(fileMd5(apk));
+    }
+
+    /** The md5 of a file, or "" when it cannot be read. */
+    private static String fileMd5(File f) {
+        MessageDigest digest;
+        try {
+            digest = MessageDigest.getInstance("MD5");
+        } catch (Exception e) {
+            return "";
+        }
+        InputStream in = null;
+        try {
+            in = new FileInputStream(f);
+            byte[] buf = new byte[1 << 16];
+            int n;
+            while ((n = in.read(buf)) > 0) digest.update(buf, 0, n);
+            return hex(digest.digest());
+        } catch (IOException e) {
+            return "";
+        } finally {
+            if (in != null) try { in.close(); } catch (IOException e) { }
+        }
     }
 
     /*
