@@ -1,0 +1,31 @@
+#!/bin/sh
+# Gate for growth: the app enlarges the sparse file, this gate proves the guest
+# turns that into a bigger filesystem. It runs on both disks -- the base (ubd0,
+# the image the release replaces) and the data disk (ubd1) -- and prints the
+# resulting block counts so a second boot can be compared with the first.
+#
+# The host side (harness/growfs.sh) boots it twice with different file sizes; a
+# single boot cannot show growth. This is init=/grow-init on the docker image.
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+export PATH
+
+fail() { echo "GATE_GROW_FAIL $*"; exit 1; }
+
+mount -t proc     none /proc 2>/dev/null
+mount -t sysfs    none /sys  2>/dev/null
+mount -t devtmpfs none /dev  2>/dev/null
+
+[ -b /dev/ubdb ] || fail "no /dev/ubdb (ubd1 missing)"
+
+/umarm-data.sh || fail "/umarm-data.sh failed"
+[ -x /umarm-growfs.sh ] || fail "/umarm-growfs.sh missing"
+/umarm-growfs.sh /dev/ubda /dev/ubdb || fail "growfs returned non-zero"
+
+# Blocks, in 1 KiB units, for each filesystem. `df -k` is enough and needs no
+# e2fsprogs-extra, which is the same constraint umarm-data.sh respects.
+base=$(df -k / | awk 'NR==2 {print $2}')
+data=$(df -k /data | awk 'NR==2 {print $2}')
+echo "GATE_GROW base_blocks=$base data_blocks=$data"
+echo UMARM_GROW_OK
+sync
+exec /umarm-poweroff

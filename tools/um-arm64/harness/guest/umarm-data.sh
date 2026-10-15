@@ -72,6 +72,11 @@ if ! mount -t ext4 "$DATA_DEV" "$DATA_DIR" 2>/dev/null; then
 	exit 0
 fi
 
+# The app grows the backing file, this fills the filesystem. Online grow on a
+# mounted ext4 is fine, and a no-op when the app did not enlarge anything.
+# umarm-growfs.sh is a no-op too when the image has no resize2fs.
+[ -x /umarm-growfs.sh ] && /umarm-growfs.sh "$DATA_DEV"
+
 for pair in $PAIRS; do
 	name=${pair%%:*}
 	dst=${pair#*:}

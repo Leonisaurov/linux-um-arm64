@@ -105,6 +105,11 @@ else
 	log "no umarm.share= on the command line, so there is no /host"
 fi
 
+# --- grow the base image ----------------------------------------------------
+# The base image is a disk with the filesystem directly on it, so a file the
+# app made longer is a bigger /dev/ubda; grow to it while / is mounted rw.
+[ -x /umarm-growfs.sh ] && /umarm-growfs.sh /dev/ubda
+
 # --- the persistent data disk -----------------------------------------------
 # Mount before anything reads /home or starts dockerd, so the wizard creates the
 # user's home on the data disk and docker's state is the user's, not the base
