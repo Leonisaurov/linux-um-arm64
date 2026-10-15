@@ -299,6 +299,11 @@ usb sit in Settings behind it. The keys moved into the drawer, which costs
 nothing: a latched `CTRL` still applies to the next character from the soft
 keyboard, and the terminal is not 40dp shorter for the rest of the session.
 
+The drawer also carries a **Data** section -- back up, restore, export and import
+the guest's data disk -- and the two update entries. Settings stays how the app
+and the guest are configured; the data disk and its backups are
+`doc/85-data-disk.md`.
+
 The APK is 27 MB, and most of that is the kernel: 12 MB stripped, plus the pty
 helper and the passt binaries. `harness/ci-umapp.sh` is the
 signature/manifest/contents check and asserts the terminal classes in

@@ -116,3 +116,10 @@ reemplazo de la base; lo que estaba sólo en la base (`/etc/base-rev`) se fue co
 ella; y el asistente no vuelve a correr. El disco quedó comprobado además con
 `debugfs` desde el host. El gate `data` de CI pasa en la misma corrida
 (`UMARM_VERDICT=PASS`).
+
+Lo que **no** está verificado en un dispositivo: la UI del APK (Back up, Restore,
+Export, Import) y un arranque real de la app con el disco de datos. El APK
+compila, `harness/ci-umapp.sh` comprueba que las cadenas estén en el dex y que
+la firma y el manifiesto sigan bien, y el camino del guest es el mismo que sí se
+verificó acá -- pero la primera corrida en el teléfono queda pendiente, anotada
+en `PENDIENTES.md`, «Sin probar».

@@ -78,12 +78,20 @@ installed on Termux and is an avoidable moving part.
 | `g5-hostfs` | Alpine ext4 on `ubd0` | `rw` + `hostfs=<dir>` | the host filesystem bridge, verified from the host side |
 | `g7-debian` | Debian ext4 on `ubd0` | `rw` | a real gcc and glibc in the guest, with the program's output checked |
 | `docker-prereqs` | Debian ext4 on `ubd0` | `rw` (kernel built with `docker.config`) | cgroup v2, overlayfs, namespaces, veth/bridge, nftables |
+| `rc-docker` | Alpine+Docker ext4 on `ubd0` (docker kernel) | `rw` | `rc-service docker` boots the daemon from the image the app ships |
+| `console` | Alpine+Docker ext4 on `ubd0` (docker kernel) | `rw` | the app's console contract: world-readable account databases, `doas` setuid for wheel, a controlling tty |
+| `data` | Alpine+Docker ext4 on `ubd0` + an empty disk on `ubd1` (docker kernel) | `rw` | the persistent data disk: format on first boot, seed from the base, and a remount that keeps what was written |
 | `mod-64m` | Alpine ext4 on `ubd0` | `rw`, `hostfs=<dir>`, `mem=64M` | gate 10: a real `.ko` through hostfs, loaded with `insmod`, at the memory size where no PLT is needed |
 | `mod-512m` | Alpine ext4 on `ubd0` | `rw`, `hostfs=<dir>`, `mem=512M` | the same module where the module region is far enough from the kernel text that `CALL26` cannot reach and PLTs are mandatory |
 | `mod-3g` | Alpine ext4 on `ubd0` | `rw`, `hostfs=<dir>`, `mem=3G` | the same module where `ADRP` is near its limit and the veneer path runs |
 | `rss-16k` | Debian ext4 on `ubd0` | `rw` | the rss counters at 16 KB pages: large folios on ext4, faulted in through a file mapping, one mm freed per child |
 | `rss-4k` | Debian ext4 on `ubd0` | `rw` (kernel built at `PAGE_SIZE=4k`) | the same workload at 4 KB pages, which the port's own notes leave untested. Skipped with a reason on a host whose pages are larger, because a 4 KB guest cannot boot there |
 | `rss-control` | Debian ext4 on `ubd0` | `rw` (kernel built with the literal `PTRS_PER_PTE`) | the negative control: it must *reproduce* `Bad rss-counter`, and a control that does not is reported as a failure of the control |
+
+The `data` row is the only one that asks for a second disk. `native.sh` makes the
+sparse, *unformatted* `UBD1` (512 MiB) it names -- formatting it is part of what
+the gate tests -- and the guest then formats, seeds and mounts it. The contract
+is in `doc/85-data-disk.md`.
 
 The `g2` fixture is `harness/probe/guestinit.c` as `/init`: a freestanding
 aarch64 binary with its own `_start`, raw `svc #0` calls, one guest capability

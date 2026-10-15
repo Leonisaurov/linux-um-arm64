@@ -22,6 +22,12 @@
 # EXTRA_ARGS="seccomp=on nosysemu". STUB_EXE=<path> forwards stub_exe=<path>,
 # which Android's untrusted_app domain needs because it refuses execveat on a
 # memfd (confirmed on-device; see doc/70-android.md).
+#
+# UBD1=<path> adds a second disk as ubd1, which is how the app passes the
+# guest's persistent data disk. A gate that names one gets a sparse file of
+# UBD1_SIZE (512M) when the path does not exist -- unformatted on purpose,
+# because the guest formatting it is what the data gate tests. See
+# doc/85-data-disk.md.
 set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)

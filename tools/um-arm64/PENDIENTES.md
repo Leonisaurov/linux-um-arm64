@@ -293,6 +293,11 @@ de `console-init` también hace que la causa no pueda volver a pasar inadvertida
 - **Más de una CPU**: UML es uniprocesador (`CONFIG_SMP` off), así que no hay
   `cpuset` que probar; `docker info` avisa `No cpuset support`. No es algo
   pendiente de arreglar, es una propiedad de UML.
+- **La UI de copias de seguridad en el teléfono**: el disco de datos del guest
+  está verificado (dos arranques con la base reemplazada en Termux, y el gate
+  `data` de CI), y el APK compila y pasa `ci-umapp.sh`, pero las entradas
+  *Back up*/*Restore*/*Export*/*Import* del drawer no se corrieron en un
+  dispositivo todavía. Ver `doc/85-data-disk.md`.
 
 ## CI
 

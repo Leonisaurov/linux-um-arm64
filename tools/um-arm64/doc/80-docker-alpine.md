@@ -89,6 +89,13 @@ sin privilegios aplica el umask y los deja 0600. En la imagen del teléfono esas
 dos cosas se corrigieron una vez desde adentro del guest. El detalle y el gate
 (`harness/guest/console-init`) están en `doc/70-android.md`, «The console».
 
+Y un disco de datos: el guest monta un segundo disco (`ubd1`, `/dev/ubdb`) en
+`/data` y bind-montea `/var/lib/docker`, `/home`, `/var/lib/umarm` y `/root`
+desde ahí, para que reemplazar la imagen base no se lleve las imágenes que el
+usuario bajó con docker. `mkdockerimage.sh` instala `e2fsprogs` porque
+`/umarm-data.sh` formatea ese disco con `mkfs.ext4` la primera vez. Todo el
+contrato, el lado de la app y los backups están en `doc/85-data-disk.md`.
+
 ## 2. El kernel
 
 Docker son features del kernel (namespaces, cgroup v2, overlayfs, veth, bridge,
