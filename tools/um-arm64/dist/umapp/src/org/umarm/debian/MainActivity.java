@@ -1811,29 +1811,36 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
     }
 
     private void gzipFile(File in, File out, Progress p) throws IOException {
+        OutputStream out2 = new FileOutputStream(out);
+        try {
+            gzipTo(in, out2, p);
+        } finally {
+            out2.close();
+        }
+    }
+
+    /**
+     * Gzip a file onto an already-open stream. The stream is wrapped and the
+     * wrapper closed, so the gzip trailer is written and the underlying stream
+     * is flushed and closed. That is what the export path needs: writing the
+     * bytes raw would put an ext4 image under a .gz name, and skipping the
+     * close would leave the archive without its trailer.
+     */
+    private void gzipTo(File in, OutputStream out, Progress p) throws IOException {
         InputStream is = new FileInputStream(in);
         try {
-            OutputStream os = new GZIPOutputStream(new FileOutputStream(out), 1 << 16);
+            GZIPOutputStream gz = new GZIPOutputStream(out, 1 << 16);
             try {
-                gzipTo(is, os, in.length(), p);
+                gzipBytes(is, gz, in.length(), p);
             } finally {
-                os.close();
+                gz.close();
             }
         } finally {
             is.close();
         }
     }
 
-    private void gzipTo(File in, OutputStream os, Progress p) throws IOException {
-        InputStream is = new FileInputStream(in);
-        try {
-            gzipTo(is, os, in.length(), p);
-        } finally {
-            is.close();
-        }
-    }
-
-    private void gzipTo(InputStream is, OutputStream os, long total, Progress p) throws IOException {
+    private void gzipBytes(InputStream is, OutputStream os, long total, Progress p) throws IOException {
         progress(p, "compressing", 0, total);
         byte[] buf = new byte[1 << 16];
         long done = 0, last = 0;
@@ -1854,7 +1861,7 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         try {
             OutputStream os = new FileOutputStream(out);
             try {
-                gunzipFrom(is, os, gzipIsize(in), p);
+                gunzipBytes(is, os, gzipIsize(in), p);
             } finally {
                 os.close();
             }
@@ -1863,16 +1870,27 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         }
     }
 
-    private void gunzipFrom(InputStream is, File out, Progress p) throws IOException {
-        OutputStream os = new FileOutputStream(out);
+    /**
+     * Gunzip an already-open stream onto a file. The stream is wrapped, so the
+     * compressed bytes are decompressed rather than copied -- and the wrapper
+     * is closed, which closes the caller's stream too (the import path hands in
+     * a document-provider stream and nothing else closes it).
+     */
+    private void gunzipFrom(InputStream in, File out, Progress p) throws IOException {
+        GZIPInputStream gz = new GZIPInputStream(in, 1 << 16);
         try {
-            gunzipFrom(is, os, 0, p);
+            OutputStream os = new FileOutputStream(out);
+            try {
+                gunzipBytes(gz, os, 0, p);
+            } finally {
+                os.close();
+            }
         } finally {
-            os.close();
+            gz.close();
         }
     }
 
-    private void gunzipFrom(InputStream is, OutputStream os, long raw, Progress p) throws IOException {
+    private void gunzipBytes(InputStream is, OutputStream os, long raw, Progress p) throws IOException {
         progress(p, "unpacking", 0, raw);
         byte[] buf = new byte[1 << 16];
         long done = 0, last = 0;
