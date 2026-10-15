@@ -45,6 +45,16 @@ mount_once tmpfs    /tmp     tmpfs
 
 [ -r /proc/self/stat ] || echo "umarm-init: WARNING: procfs did not mount"
 
+# --- shutdown, whoever asks for it ------------------------------------------
+# busybox `reboot`/`poweroff`/`halt` do not call reboot(2) when they are not
+# PID 1: they signal PID 1 (SIGTERM / SIGUSR2 / SIGUSR1 respectively) and
+# return, which is how a real init system is asked to do it. PID 1 here is this
+# script, so without these handlers a typed `reboot` would kill it, and the
+# kernel would print "Attempted to kill init" and hang under panic=-1. Run the
+# UML-side helpers, which do the syscall (or the sysrq equivalent).
+trap 'sync; exec /umarm-reboot'   TERM
+trap 'sync; exec /umarm-poweroff' USR1 USR2 INT HUP
+
 # --- the host share ---------------------------------------------------------
 share=$(tr ' ' '\n' < /proc/cmdline 2>/dev/null |
 	sed -n 's/^umarm\.share=//p' | tail -1)

@@ -54,6 +54,18 @@ mount_once tmpfs    /tmp     tmpfs
 
 [ -r /proc/self/stat ] || log "WARNING: procfs did not mount"
 
+# --- shutdown, whoever asks for it ------------------------------------------
+# busybox `reboot`/`poweroff`/`halt` do not call reboot(2) when they are not
+# PID 1: they signal PID 1 (SIGTERM / SIGUSR2 / SIGUSR1 respectively) and
+# return, which is how a real init system is asked to do it. PID 1 here is this
+# script -- the console shell is a child, even through busybox setsid, which
+# the shell waits on -- so without these handlers a typed `reboot` would kill
+# it, and the kernel would print "Attempted to kill init" and hang under
+# panic=-1. Run the UML-side helpers, which do the syscall (or the sysrq
+# equivalent).
+trap 'sync; exec /umarm-reboot'   TERM
+trap 'sync; exec /umarm-poweroff' USR1 USR2 INT HUP
+
 # cgroup v2, which is the only hierarchy docker uses on this kernel and which
 # nothing in the minirootfs mounts for itself.
 if [ ! -e /sys/fs/cgroup/cgroup.controllers ]; then

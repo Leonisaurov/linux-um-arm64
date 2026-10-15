@@ -74,6 +74,12 @@ init system at all and that binary may simply not be present -- and PID 1 exitin
 is not a shutdown: under `panic=-1` the kernel hangs instead, which the launcher
 cannot tell from a guest still working.
 
+`/umarm-init` traps the signals busybox sends an init (`reboot` sends SIGTERM,
+`poweroff` SIGUSR2, `halt` SIGUSR1 -- it only signals PID 1 unless passed `-f`)
+and runs `/umarm-poweroff` or its sibling `/umarm-reboot`, so a `reboot` typed in
+the guest does something instead of killing PID 1 and wedging the boot. A UML
+reboot is a re-exec of the kernel binary, so that guest comes back from scratch.
+
 ## Notes
 
 * Guest RAM defaults to 1 GB; override with `UMDEB_MEM=2048M ./deb`.

@@ -9,7 +9,7 @@
 #   * Alpine from the pinned minirootfs, with docker, openrc and the compose
 #     plugin installed from the pinned release;
 #   * /umarm-init (the Alpine PID 1) installed as the guest's init, plus
-#     /umarm-poweroff and /umalpine-net.sh;
+#     /umarm-poweroff, /umarm-reboot and /umalpine-net.sh;
 #   * a root-owned tree. This is load-bearing, not housekeeping: an Alpine
 #     minirootfs extracted by an unprivileged user has /bin and /lib owned by
 #     that user and mode 0700, so guest root reaches them only through
@@ -84,7 +84,8 @@ $SUDO "$LOADER" --library-path "$STAGE/lib:$STAGE/usr/lib" "$APK" \
 
 echo "== guest-side files ==" >&2
 # Every gate init, the Alpine PID 1 (which the loop would otherwise overwrite
-# with the Debian guest/umarm-init of the same name), and the power-off helper.
+# with the Debian guest/umarm-init of the same name), and the power-off and
+# reboot helpers.
 for f in "$HERE"/guest/*; do
 	$SUDO install -m 0755 "$f" "$STAGE/$(basename "$f")"
 done

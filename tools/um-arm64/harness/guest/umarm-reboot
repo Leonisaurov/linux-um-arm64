@@ -1,0 +1,35 @@
+#!/bin/sh
+# Ask the guest kernel to reboot, by whatever means this image happens to have.
+#
+# The counterpart of /umarm-poweroff, and it exists for the same reason plus
+# one more. busybox's `reboot` is not a kernel reboot when it is not PID 1: it
+# only signals PID 1 (SIGTERM) and returns, which is how a real init system is
+# asked to reboot. This image has no init system -- PID 1 is /umarm-init, a
+# shell script -- so nothing would happen; and if the signal did reach PID 1
+# with its default action, the kernel would print "Attempted to kill init" and,
+# under panic=-1, hang. /umarm-init traps the signal and execs this.
+#
+# What a UML reboot can be: machine_restart() has no hardware to reset, so it
+# cleans up and re-execs the kernel binary (execvp of argv[0]); the guest comes
+# back up from scratch. `reboot -f` below does that, and the sysrq fallback
+# reaches the same handler.
+#
+# Installed into the image by mkrootfs.sh and mkdockerimage.sh, next to the
+# gate inits and umarm-init. Absolute paths first because nothing here should
+# depend on PATH.
+
+for c in "/sbin/reboot -f" "/usr/sbin/reboot -f" "/bin/reboot -f" \
+         "reboot -f" "busybox reboot -f"; do
+	$c >/dev/null 2>&1 && exit 0
+done
+
+# Last resort: the kernel's own restart handler, kernel_restart() ->
+# machine_restart(), which UML wires to reboot_skas(). sysrq-trigger
+# deliberately ignores /proc/sys/kernel/sysrq, so this does not depend on the
+# mask being non-zero. CONFIG_MAGIC_SYSRQ=y in arm64_defconfig.
+sync
+echo b > /proc/sysrq-trigger 2>/dev/null
+
+# If either worked, this process is already gone.
+sleep 3
+exit 0
