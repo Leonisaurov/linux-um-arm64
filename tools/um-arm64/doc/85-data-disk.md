@@ -57,8 +57,9 @@ vuelve a montar —que es el próximo arranque— y lee lo que escribió.
 ## El lado de la app
 
 - **Creación**: `ensureGuestData()` crea `data.ext4` como archivo *sparse* de
-  2 GiB en `getFilesDir()`. Nada lo formatea de este lado (no puede: no hay
-  `mkfs` en la app); lo formatea el guest en el primer arranque.
+  2 GiB (o del tamaño deseado, ver *Agrandar*) en `getFilesDir()`. Nada lo
+  formatea de este lado (no puede: no hay `mkfs` en la app); lo formatea el
+  guest en el primer arranque.
 - **Boot**: `boot()` agrega `ubd1=<data.ext4>` a la línea de comandos del kernel.
   Si el archivo no se puede crear, el guest arranca igual y sus datos quedan en
   la base, como antes.
@@ -79,6 +80,47 @@ vuelve a montar —que es el próximo arranque— y lee lo que escribió.
 
 Los backups exigen el guest apagado, igual que la instalación de imagen: el
 archivo estaría cambiando debajo.
+
+## Agrandar
+
+Los dos discos se pueden agrandar y **sólo** agrandar. El contrato son dos
+mitades, y cada una tiene que hacer su parte:
+
+| | archivo | quién estira el archivo | quién estira el filesystem |
+| --- | --- | --- | --- |
+| base Alpine | `rootfs.ext4` (`ubd0`) | la app, `growFile()` | el guest, `resize2fs /dev/ubda` |
+| datos/home | `data.ext4` (`ubd1`) | la app, `ensureGuestData()`/`growFile()` | el guest, `resize2fs /dev/ubdb` |
+
+- **El archivo lo estira la app** con `RandomAccessFile.setLength()`, que en un
+  sparse es instantáneo y no reserva nada hasta que se escribe. El tamaño
+  deseado se guarda en `prefs` (`dataSizeBytes`, `baseSizeBytes`) en lugar de
+  inferirse del archivo, porque una actualización de imagen reemplaza
+  `rootfs.ext4` por el de release; `installImage()` vuelve a agrandarlo después
+  de instalarlo, si no el crecimiento se perdería.
+- **El filesystem lo estira el guest** en el arranque, con
+  `harness/guest/umarm-growfs.sh`, que corre `resize2fs <dev>` sin argumento de
+  tamaño (que significa "al tamaño del dispositivo"). UML no tiene tabla de
+  particiones: `/dev/ubdX` *es* el filesystem y el tamaño del bloque es el del
+  archivo, así que no hay partición que mover. `resize2fs` sobre un ext4 montado
+  soporta crecer en línea, que es lo que hay: ambos discos ya están montados.
+  Si el filesystem ya llena el dispositivo imprime "nothing to do" y sale 0, así
+  que llamarlo siempre es seguro y correcto exactamente una vez, el arranque
+  siguiente a que la app alargó el archivo. `umarm-data.sh` lo llama para
+  `ubdb` y `umarm-init-alpine` para `ubda`, antes de montar el disco de datos.
+- **No se encoge.** Un ext4 encogido desde este lado quedaría con bloques más
+  allá del final del archivo. Encoger exigiría guest apagado, backup,
+  `resize2fs -M` y `e2fsck -f`, y el valor no está mientras
+  `getFilesDir().getUsableSpace()` alcance.
+- **La UI**: el drawer tiene `Grow disks…` en la sección **Data**, con un campo
+  por disco en GiB y una línea con lo que ocupan hoy y el espacio libre. Guardar
+  persiste los dos tamaños y llama a `applyDesiredSizes()`; el guest los aplica
+  en el arranque siguiente.
+- **El gate**: `harness/guest/grow-init` más `harness/growfs.sh`, que arranca la
+  misma imagen dos veces con el mismo disco de datos —256 MiB y después 768 MiB,
+  y la base de 1 GiB a 1,5 GiB— y exige que el segundo arranque reporte más
+  bloques en los dos. `resize2fs` viene de `e2fsprogs`, que ya está en la imagen
+  por `mkfs.ext4`; sin él, el script sólo deja una línea en el log y el arranque
+  sigue.
 
 ## La transición desde el esquema de un solo disco
 

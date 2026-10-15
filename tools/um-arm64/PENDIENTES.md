@@ -293,11 +293,12 @@ de `console-init` también hace que la causa no pueda volver a pasar inadvertida
 - **Más de una CPU**: UML es uniprocesador (`CONFIG_SMP` off), así que no hay
   `cpuset` que probar; `docker info` avisa `No cpuset support`. No es algo
   pendiente de arreglar, es una propiedad de UML.
-- **La UI de copias de seguridad en el teléfono**: el disco de datos del guest
-  está verificado (dos arranques con la base reemplazada en Termux, y el gate
-  `data` de CI), y el APK compila y pasa `ci-umapp.sh`, pero las entradas
-  *Back up*/*Restore*/*Export*/*Import* del drawer no se corrieron en un
-  dispositivo todavía. Ver `doc/85-data-disk.md`.
+- **La UI de copias de seguridad y de crecimiento en el teléfono**: el disco de
+  datos del guest está verificado (dos arranques con la base reemplazada en
+  Termux, y los gates `data` y `grow` de CI), y el APK compila y pasa
+  `ci-umapp.sh`, pero las entradas *Back up*/*Restore*/*Export*/*Import* y
+  *Grow disks…* del drawer no se corrieron en un dispositivo todavía, ni se vio
+  el anillo rojo del handle con el guest apagado. Ver `doc/85-data-disk.md`.
 
 ## CI
 
@@ -316,6 +317,12 @@ descarga). Y `console` (kernel `docker`, imagen `alpine-docker.ext4`,
 consola se pueda tomar como controladora. El job `build` construye esa imagen y
 la sube con el resto, y el job `publish` la publica como release (con el
 `paths-ignore` de siempre, un commit de docs no republica nada).
+
+El job `grow` es aparte de la matriz porque crecer un disco son **dos**
+arranques con el archivo alargado en el medio y la matriz arranca una sola vez
+por fila: `harness/growfs.sh` arranca `init=/grow-init` sobre el mismo disco de
+datos, primero de 256 MiB y después de 768 MiB, copia y alarga la base igual, y
+exige que el segundo arranque reporte más bloques en los dos (`UMARM_GROW_PASS`).
 
 Detalle que costó tiempo: `harness/umalpine.sh` en modo one-shot **bufferiza**
 toda la salida del guest y la imprime recién cuando el kernel sale. Si el guest
