@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The drawer handle while the guest is *not* running: the normal circle with a
+  red ring around it. It is the one control always on screen and the way into
+  the drawer that holds Boot and Settings, so it is where "something still has
+  to be started" has to be visible without opening anything. The ring is a
+  stroke and not a fill: the icon stays readable, and it is two cues (ring plus
+  contentDescription), not colour alone.
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_pressed="true">
+        <shape android:shape="oval">
+            <solid android:color="#E6414141" />
+            <stroke android:width="2dp" android:color="#FFFF5252" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="oval">
+            <solid android:color="#B31A1A1A" />
+            <stroke android:width="2dp" android:color="#FFFF5252" />
+        </shape>
+    </item>
+</selector>

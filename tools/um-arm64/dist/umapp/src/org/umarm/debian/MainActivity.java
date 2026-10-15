@@ -153,6 +153,15 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
      */
     private static final String DATA_NAME = "data.ext4";
     private static final long DATA_SIZE = 2L << 30;
+    /*
+     * Desired sizes, in bytes. Persisted because a guest-image update replaces
+     * rootfs.ext4 with the release's size, so the app has to know to grow it
+     * again; the guest does the filesystem side at boot. 0 for the base means
+     * "whatever the release ships". Only growth is offered: shrinking an ext4
+     * with data on it is a different operation with a different risk.
+     */
+    private static final String PREF_DATA_SIZE = "dataSizeBytes";
+    private static final String PREF_BASE_SIZE = "baseSizeBytes";
     private static final String BACKUP_DIR = "backups";
     private static final String BACKUP_PREFIX = "data-";
     private static final String BACKUP_SUFFIX = ".ext4.gz";
@@ -186,6 +195,11 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
     private TextView ctrlKey;
     private TextView altKey;
     private TextView handleView;
+    /*
+     * The drawer row for Settings, kept so the alert can mark it too. The
+     * always-visible cue is the handle; this is the same state one tap deeper.
+     */
+    private TextView settingsItem;
     /* Drag state for the handle, and the timer that shrinks it when idle. */
     private float handleDownX, handleDownY;
     private int handleStartX, handleStartY;
@@ -287,6 +301,7 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         paintModifiers();
         applyFont();
         applyChrome();
+        paintBootState();
 
         /*
          * Where the handle goes is only known once the content has been laid
@@ -343,6 +358,9 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         applyChrome();
         if (terminalView != null && terminalView.mEmulator != null)
             terminalView.onScreenUpdated();
+        /* Coming back from a dialog or the installer changes nothing the state
+         * methods saw, so the alert is repainted here too. */
+        paintBootState();
     }
 
     @Override
@@ -436,12 +454,15 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         drawerItem(v, "Import a backup\u2026", new View.OnClickListener() {
             @Override public void onClick(View w) { closeDrawer(); importBackup(); }
         });
+        drawerItem(v, "Grow disks\u2026", new View.OnClickListener() {
+            @Override public void onClick(View w) { closeDrawer(); showGrowDisks(); }
+        });
 
         drawerSection(v, "Keys");
         v.addView(buildKeyGrid());
 
         drawerSection(v, "More");
-        drawerItem(v, "Settings", new View.OnClickListener() {
+        settingsItem = drawerItem(v, "Settings", new View.OnClickListener() {
             @Override public void onClick(View w) { closeDrawer(); showSettings(); }
         });
 
@@ -667,7 +688,10 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
 
     private void shrinkHandleNow() {
         if (handleView == null) return;
-        handleView.animate().scaleX(0.62f).scaleY(0.62f).alpha(0.45f)
+        /* An alert must stay readable after the idle shrink, so it does not fade
+         * as far as the ordinary handle does. */
+        float a = isGuestRunning() ? 0.45f : 0.8f;
+        handleView.animate().scaleX(0.62f).scaleY(0.62f).alpha(a)
                 .setDuration(400).start();
     }
 
@@ -950,6 +974,28 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
          * through readShiftKey()/readFnKey(). */
     }
 
+    /*
+     * Whether the guest is up, as something the screen says without being asked.
+     * Not running means the handle is the only place to say it -- the drawer is
+     * closed -- so it gets a red ring, and the Settings row behind it gets the
+     * same colour for the moment the drawer is open. Both are switched off the
+     * moment a session exists: "booting" and "booted" are close enough that a
+     * second state would only flicker.
+     */
+    private void paintBootState() {
+        boolean running = isGuestRunning();
+        if (handleView != null) {
+            handleView.setBackgroundResource(running
+                    ? R.drawable.umarm_handle_bg
+                    : R.drawable.umarm_handle_alert_bg);
+            handleView.setContentDescription(running
+                    ? "Open the umarm menu"
+                    : "The guest is not booted. Open the menu to start it.");
+        }
+        if (settingsItem != null)
+            settingsItem.setTextColor(running ? 0xFFE8E8E8 : 0xFFFF5252);
+    }
+
     private void writeToSession(String s) {
         if (session == null || !session.isRunning()) {
             toast("guest is not running");
@@ -1105,6 +1151,74 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
+    }
+
+    /*
+     * Growing is the app's half of one operation: it makes the file longer, and
+     * the guest's next boot makes the filesystem fill it. The dialog says the
+     * sizes in GiB and refuses to pretend shrinking is available. The free-space
+     * line is the honest number for a sparse file: a bigger file allocates
+     * nothing until it is written, so free space is a warning, not a limit.
+     */
+    private void showGrowDisks() {
+        if (isGuestRunning()) { toast("stop the guest first"); return; }
+
+        final File data = new File(getFilesDir(), DATA_NAME);
+        final File base = new File(getFilesDir(), IMAGE_NAME);
+        long dataGiB = Math.max(1, desiredDataSize() >> 30);
+        long baseGiB = desiredBaseSize() > 0
+                ? desiredBaseSize() >> 30
+                : (base.exists() ? base.length() >> 30 : 1);
+
+        LinearLayout v = new LinearLayout(this);
+        v.setOrientation(LinearLayout.VERTICAL);
+        v.setPadding(dp(20), dp(4), dp(20), dp(4));
+
+        drawerSection(v, "Data disk (home, docker)");
+        final EditText dataField = new EditText(this);
+        dataField.setInputType(InputType.TYPE_CLASS_NUMBER);
+        dataField.setText(String.valueOf(dataGiB));
+        v.addView(dataField);
+
+        drawerSection(v, "Base image (Alpine)");
+        final EditText baseField = new EditText(this);
+        baseField.setInputType(InputType.TYPE_CLASS_NUMBER);
+        baseField.setText(String.valueOf(baseGiB));
+        v.addView(baseField);
+
+        TextView note = new TextView(this);
+        note.setText("Sizes in GiB. Disks only ever grow. The guest grows the "
+                + "filesystem on its next boot.\n\nNow: data "
+                + (data.length() >> 20) + " MB, base " + (base.length() >> 20)
+                + " MB. Free: " + (getFilesDir().getUsableSpace() >> 20) + " MB.");
+        v.addView(note);
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(v);
+
+        new AlertDialog.Builder(this)
+                .setTitle("Grow disks")
+                .setView(scroll)
+                .setPositiveButton("Grow", new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface d, int which) {
+                        long gb = parseGiB(dataField.getText().toString());
+                        long bb = parseGiB(baseField.getText().toString());
+                        prefs.edit()
+                                .putLong(PREF_DATA_SIZE, gb << 30)
+                                .putLong(PREF_BASE_SIZE, bb << 30)
+                                .apply();
+                        boolean ok = applyDesiredSizes();
+                        toast(ok ? "grown -- reboot the guest to resize the filesystem"
+                                 : "could not grow; see the log");
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private static long parseGiB(String s) {
+        try { return Math.max(0, Long.parseLong(s.trim())); }
+        catch (NumberFormatException e) { return 0; }
     }
 
     /*
@@ -1295,6 +1409,7 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
             showKeyboardSoon();
             applyKeepAwake();
             startGuestService();
+            paintBootState();
         } catch (Exception e) {
             fail("ERROR: could not start the guest: " + e);
         }
@@ -1309,6 +1424,7 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         usbRelease();
         applyKeepAwake();
         stopGuestService();
+        paintBootState();
     }
 
     private void fail(String s) {
@@ -1316,6 +1432,7 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         toast(s);
         startStop.setText("Boot");
         applyKeepAwake();
+        paintBootState();
     }
 
     /* ------------------------------------------------------------------
@@ -1336,6 +1453,7 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         usbRelease();
         applyKeepAwake();
         stopGuestService();
+        paintBootState();
     }
 
     @Override public void onCopyTextToClipboard(TerminalSession s, String text) {
@@ -1542,6 +1660,46 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         return (f.exists() && f.length() > 0) ? f : null;
     }
 
+    private long desiredDataSize() {
+        return Math.max(DATA_SIZE, prefs.getLong(PREF_DATA_SIZE, DATA_SIZE));
+    }
+
+    private long desiredBaseSize() {
+        return prefs.getLong(PREF_BASE_SIZE, 0L);
+    }
+
+    /**
+     * Grow a sparse file to at least `target` bytes. A larger sparse file costs
+     * no space until it is written, so this is only refused when the file
+     * cannot be extended at all. Never shrinks: an ext4 shrunk from this side
+     * would be a filesystem with blocks past its end.
+     */
+    private boolean growFile(File f, long target) {
+        if (f == null || !f.exists() || target <= f.length()) return false;
+        RandomAccessFile raf = null;
+        try {
+            raf = new RandomAccessFile(f, "rw");
+            raf.setLength(target);
+            log("grew " + f.getName() + " to " + (target >> 30) + " GiB\n");
+            return true;
+        } catch (Exception e) {
+            log("cannot grow " + f + ": " + e + "\n");
+            return false;
+        } finally {
+            if (raf != null) try { raf.close(); } catch (IOException e) { }
+        }
+    }
+
+    /** Apply both desired sizes; false when either failed. */
+    private boolean applyDesiredSizes() {
+        boolean ok = true;
+        if (guestData() != null) ok &= growFile(guestData(), desiredDataSize());
+        File base = guestImage();
+        if (base != null && desiredBaseSize() > 0)
+            ok &= growFile(base, desiredBaseSize());
+        return ok;
+    }
+
     /**
      * The data disk, created as a sparse file the first time. The guest's init
      * formats it (ext4) on the boot that follows, because nothing on this side
@@ -1556,11 +1714,11 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         try {
             RandomAccessFile raf = new RandomAccessFile(f, "rw");
             try {
-                raf.setLength(DATA_SIZE);
+                raf.setLength(desiredDataSize());
             } finally {
                 raf.close();
             }
-            log("created the data disk " + DATA_NAME + " (" + (DATA_SIZE >> 30)
+            log("created the data disk " + DATA_NAME + " (" + (desiredDataSize() >> 30)
                     + " GiB, sparse; the guest formats it on the next boot)\n");
             return f;
         } catch (Exception e) {
@@ -2476,6 +2634,13 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
             throw new IOException("cannot rename " + neu + " to " + out);
 
         setInstalledImageVersion(tag);
+        /*
+         * The archive carries the release's 1 GiB image, so a grown base would
+         * come back small. The user's desired size is a preference, not a
+         * property of the file, so it is applied again here -- grow-only, so a
+         * release that shipped larger is left alone.
+         */
+        if (desiredBaseSize() > 0) growFile(out, desiredBaseSize());
         /*
          * A freshly installed image is a fresh install, and the guest's init
          * reads this file to offer first-run setup -- it creates the non-root
