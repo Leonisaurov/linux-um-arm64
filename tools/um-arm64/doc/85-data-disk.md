@@ -118,9 +118,10 @@ mitades, y cada una tiene que hacer su parte:
 - **El gate**: `harness/guest/grow-init` más `harness/growfs.sh`, que arranca la
   misma imagen dos veces con el mismo disco de datos —256 MiB y después 768 MiB,
   y la base de 1 GiB a 1,5 GiB— y exige que el segundo arranque reporte más
-  bloques en los dos. `resize2fs` viene de `e2fsprogs`, que ya está en la imagen
-  por `mkfs.ext4`; sin él, el script sólo deja una línea en el log y el arranque
-  sigue.
+  bloques en los dos. `resize2fs` está en `e2fsprogs-extra` (Alpine no lo pone
+  en `e2fsprogs`, que es lo que trae `mkfs.ext4`), y la imagen lo instala; sin
+  él, el script sólo deja una línea en el log y el arranque sigue fallando en
+  silencio, que es justamente lo que el gate existe para atrapar.
 
 ## La transición desde el esquema de un solo disco
 

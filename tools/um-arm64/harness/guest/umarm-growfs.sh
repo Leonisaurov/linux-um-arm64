@@ -12,9 +12,10 @@
 # the boot after the app made the file longer.
 #
 # Growing a *mounted* ext4 is supported online; both disks are mounted here and
-# neither is ever shrunk from this side. resize2fs comes from e2fsprogs, which
-# is in the image for mkfs.ext4 anyway; without it this degrades to a log line
-# instead of failing a boot that would otherwise be fine.
+# neither is ever shrunk from this side. resize2fs is in e2fsprogs-extra (Alpine
+# does not put it in e2fsprogs, which is what mkfs.ext4 comes from) and the
+# docker image installs it; without it this degrades to a log line instead of
+# failing a boot that would otherwise be fine.
 
 log() { echo "umarm-grow: $*"; }
 

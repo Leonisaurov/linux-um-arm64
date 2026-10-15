@@ -46,7 +46,15 @@ ALPINE_BRANCH=${ALPINE_BRANCH:-v3.21}
 # first boot (mkfs.ext4). Telling a formatted disk from a fresh one does not
 # need it -- that is a superblock read -- so a missing e2fsprogs only costs the
 # ability to make the data disk, not the ability to keep it.
-PACKAGES=${PACKAGES:-"docker docker-cli-compose openrc nftables curl python3 strace doas e2fsprogs"}
+#
+# e2fsprogs-extra is where Alpine puts resize2fs (/usr/sbin/resize2fs), which
+# /umarm-growfs.sh runs at boot to fill a disk the app made longer. It is a
+# separate package from e2fsprogs -- mke2fs is in the base, resize2fs is not --
+# so without it growing a disk would silently do nothing: umarm-growfs.sh logs
+# that resize2fs is missing and the boot carries on, which is the right failure
+# for a guest that cannot grow, and exactly the wrong one for the image the app
+# ships.
+PACKAGES=${PACKAGES:-"docker docker-cli-compose openrc nftables curl python3 strace doas e2fsprogs e2fsprogs-extra"}
 
 [ "$(uname -m)" = aarch64 ] || {
 	echo "mkdockerimage.sh: needs an aarch64 host (the guest's loader is aarch64)" >&2
