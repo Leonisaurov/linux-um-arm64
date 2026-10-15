@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The launcher icon. minSdkVersion is 26, which is exactly the API adaptive
+  icons arrived in, so this is the *only* icon: no mipmap-mdpi/ic_launcher.png
+  fallback to keep in five densities and forget to update.
+
+  The same penguin is what the system splash screen shows on launch (targetSdk
+  34 uses the launcher icon for it), so the first thing after tapping is this
+  icon, not the default green Android.
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+    <!-- Ignored before Android 13, where it is the only layer that is read. -->
+    <monochrome android:drawable="@drawable/ic_launcher_monochrome" />
+</adaptive-icon>

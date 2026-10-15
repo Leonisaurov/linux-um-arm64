@@ -87,7 +87,7 @@ public class UmarmService extends Service {
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
         return new Notification.Builder(this, CHANNEL)
-                .setSmallIcon(android.R.drawable.ic_menu_manage)
+                .setSmallIcon(R.drawable.ic_notification)
                 .setContentTitle("umarm")
                 .setContentText("guest running")
                 .setOngoing(true)

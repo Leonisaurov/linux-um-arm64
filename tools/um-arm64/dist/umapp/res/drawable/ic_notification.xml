@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The foreground service's notification icon, which is the penguin reduced to the
+  one thing that survives a tint and a 24dp badge: the body and its antennae.
+
+  It replaces android.R.drawable.ic_menu_manage, which was a settings gear: the
+  notification said "umarm / guest running" next to a picture of Android's
+  settings app. A notification icon is drawn as an alpha mask and painted by the
+  system, so fillColor is a "yes, draw here" and nothing else; the belly and eyes
+  are deliberately absent, because they would be holes.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+
+    <path
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.6"
+        android:strokeLineCap="round"
+        android:pathData="M9,6 L7,3" />
+    <path
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.6"
+        android:strokeLineCap="round"
+        android:pathData="M15,6 L17,3" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12,4 C16,4 19,8 19,13 C19,18 16,21 12,21 C8,21 5,18 5,13 C5,8 8,4 12,4 Z" />
+</vector>

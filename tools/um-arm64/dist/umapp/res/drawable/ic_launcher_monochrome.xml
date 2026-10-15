@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The themed-icon layer, for Android 13's "Themed icons" switch: the launcher
+  throws the color away and keeps the alpha, then paints every icon with the
+  wallpaper's accent. That is the reason this is a solid silhouette and not a
+  copy of the foreground: the belly and the eye whites are *drawn* in the
+  foreground icon, and as alpha they would punch holes through the bird.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M45,81 a5,2.5 0 1,0 0,5 a5,2.5 0 1,0 0,-5 Z" />
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M63,81 a5,2.5 0 1,0 0,5 a5,2.5 0 1,0 0,-5 Z" />
+    <path
+        android:strokeColor="#FF000000"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:pathData="M47,33 L42,25" />
+    <path
+        android:strokeColor="#FF000000"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:pathData="M61,33 L66,25" />
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M54,30 C67,30 77,43 77,59 C77,74 67,83 54,83 C41,83 31,74 31,59 C31,43 41,30 54,30 Z" />
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M54,50 L60,55 L54,60 L48,55 Z" />
+</vector>

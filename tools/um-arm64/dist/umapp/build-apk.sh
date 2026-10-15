@@ -172,7 +172,17 @@ if [ -n "$ROOTFS_GZ" ] && [ -f "$ROOTFS_GZ" ]; then
 fi
 
 echo "== compiling =="
-"$BT/aapt2" compile --dir "$OUT/res" -o "$OUT/res.zip" 2>/dev/null
+# The compile step's output used to go to /dev/null. Under `set -e` a resource
+# aapt2 could not parse then aborted the build one line after this echo, with no
+# message at all -- the error was in the file that had just been discarded. It
+# happened on a vector drawable whose XML comment contained `--`, which XML
+# forbids: the only clue left was the build stopping here. Checked and reported
+# the way the link below already was.
+if ! "$BT/aapt2" compile --dir "$OUT/res" -o "$OUT/res.zip" > "$OUT/aapt2-compile.log" 2>&1; then
+	echo "aapt2 compile failed:" >&2
+	head -20 "$OUT/aapt2-compile.log" >&2
+	exit 2
+fi
 
 # Each of these checks its own status rather than being filtered through a
 # pipeline. `cmd | grep -v ... | head` cannot report failure under pipefail --

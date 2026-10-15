@@ -310,6 +310,53 @@ signature/manifest/contents check and asserts the terminal classes in
 `classes.dex`, the pty entry point in `libtermux.so`, and the strings the image
 downloader needs.
 
+### The launcher icon
+
+Until now the manifest had no `android:icon`, so every launcher drew Android's
+default green robot and the app looked like a build that had never been finished.
+It is a penguin wearing Android's antennae: the app is a Linux kernel pretending
+to be an ordinary Android program, and the parts of the picture are the parts of
+the sentence. It is also what Android 12+ shows in the launch splash, so it is
+the first thing after tapping the icon as well.
+
+It is a VectorDrawable, not a set of PNG densities:
+`res/drawable/ic_launcher_{background,foreground,monochrome}.xml` and the two
+`res/mipmap-anydpi-v26/ic_launcher{,_round}.xml` wrappers that name them as
+adaptive layers. `minSdkVersion` is 26, which is exactly the API adaptive icons
+arrived in, so there is no `mipmap-mdpi/ic_launcher.png` fallback to keep in five
+densities and forget to update. Everything in the foreground is `<path>` data:
+VectorDrawable has no `<circle>`, so the round parts are two arc segments, and
+the antenna tips and feet are placed to stay inside the 66dp safe circle -- they
+are the first thing a circular mask would clip, and a penguin with clipped
+antennae is just a penguin.
+
+The `monochrome` layer is the silhouette Android 13's themed-icons switch tints
+with the wallpaper accent. It is deliberately not a copy of the foreground: the
+belly and the eye whites are *drawn* there, and as alpha they would punch holes
+through the bird. The same penguin replaced `android.R.drawable.ic_menu_manage`
+as the foreground service's notification icon, which had been drawing a
+settings gear next to "guest running".
+
+Two traps this cost:
+
+* **XML comments cannot contain `--`.** A vector drawable does not need a
+  comment, but the comments here explain the geometry, and one hyphen pair in
+  them is enough for aapt2 to fail the whole resource with `not well-formed
+  (invalid token)`. `build-apk.sh` used to send `aapt2 compile` to `/dev/null`
+  and abort under `set -e` with no message at all -- the build simply stopped
+  right after `== compiling ==`. It now logs the compile output and prints it on
+  failure, the way the `aapt2 link` step already did; the first attempt at this
+  icon failed exactly that way and the error had to be re-run by hand to be read.
+* **The safe circle is smaller than the mask.** The visible area of an adaptive
+  icon is 72dp, but only a 66dp circle at the centre is guaranteed to survive
+  every launcher's mask, so the drawing has to be designed against the circle,
+  not against the square it is compiled in.
+
+`harness/ci-umapp.sh` asserts the manifest names the adaptive icon and declares
+`android:roundIcon`, and that the six resource files are actually in the APK; a
+manifest that references a missing drawable links, signs and installs, and only
+the launcher notices.
+
 ### The guest image is a release, not an APK asset
 
 The image used to be bundled: 144 MB gzipped into the APK, which made every app

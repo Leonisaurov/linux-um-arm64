@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The launcher icon's foreground layer: a penguin wearing Android's antennae.
+
+  The app is a Linux kernel that pretends to be an ordinary Android program, so
+  the icon is the two things put together rather than one or the other. The
+  antennae are the whole joke, and they are the part that has to sit inside the
+  66dp safe circle (radius 33 from the 54,54 centre). They are the first thing
+  a circular mask would clip, and a penguin with clipped antennae is just a
+  penguin.
+
+  Everything is a path: VectorDrawable has no <circle> or <ellipse>, so the round
+  parts are two arc segments, which is also why the radii are written out twice
+  (there is no way to say "and back").
+
+  Coordinates are in the 108x108 layer space. Extents: antenna tips 31.4 from
+  centre, feet 32.5, crown 24, belly bottom 29, all inside 33.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Feet first: the body is drawn over them, so only the toes show. -->
+    <path
+        android:fillColor="#FFF2992B"
+        android:pathData="M45,81 a5,2.5 0 1,0 0,5 a5,2.5 0 1,0 0,-5 Z" />
+    <path
+        android:fillColor="#FFF2992B"
+        android:pathData="M63,81 a5,2.5 0 1,0 0,5 a5,2.5 0 1,0 0,-5 Z" />
+
+    <!-- The antennae, from just under the crown out and up. -->
+    <path
+        android:strokeColor="#FF12171C"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:pathData="M47,33 L42,25" />
+    <path
+        android:strokeColor="#FF12171C"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:pathData="M61,33 L66,25" />
+
+    <!-- Body: an egg, 31..77 wide, 30..83 tall. -->
+    <path
+        android:fillColor="#FF12171C"
+        android:pathData="M54,30 C67,30 77,43 77,59 C77,74 67,83 54,83 C41,83 31,74 31,59 C31,43 41,30 54,30 Z" />
+
+    <!-- Belly, one pixel inside the body so the black rim reads at 48px. -->
+    <path
+        android:fillColor="#FFF7FAFB"
+        android:pathData="M54,50 C63,50 69,59 69,68 C69,77 62,81 54,81 C46,81 39,77 39,68 C39,59 45,50 54,50 Z" />
+
+    <!-- The white around the eyes, which is what makes it a penguin and not a
+         black egg. It runs into the belly; the beak is drawn last, over the
+         seam, the way a beak sits between the eyes. -->
+    <path
+        android:fillColor="#FFF7FAFB"
+        android:pathData="M45,37.5 a6,7.5 0 1,0 0,15 a6,7.5 0 1,0 0,-15 Z" />
+    <path
+        android:fillColor="#FFF7FAFB"
+        android:pathData="M63,37.5 a6,7.5 0 1,0 0,15 a6,7.5 0 1,0 0,-15 Z" />
+    <path
+        android:fillColor="#FF12171C"
+        android:pathData="M46.5,41.8 a2.8,4.2 0 1,0 0,8.4 a2.8,4.2 0 1,0 0,-8.4 Z" />
+    <path
+        android:fillColor="#FF12171C"
+        android:pathData="M61.5,41.8 a2.8,4.2 0 1,0 0,8.4 a2.8,4.2 0 1,0 0,-8.4 Z" />
+
+    <!-- Beak: a diamond, because a triangle at this size is a dot. -->
+    <path
+        android:fillColor="#FFF2992B"
+        android:pathData="M54,50 L60,55 L54,60 L48,55 Z" />
+</vector>

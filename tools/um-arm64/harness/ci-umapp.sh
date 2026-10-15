@@ -106,6 +106,27 @@ esac
 printf '%s\n' "$xmltree" | grep -q '"\.ApkProvider"' \
     && ok "the manifest declares ApkProvider" || bad "the manifest does not declare ApkProvider"
 
+# The launcher icon. A manifest with no android:icon is not an error Android
+# reports anywhere: the platform draws its default green robot, the app builds,
+# signs and installs, and the only place it shows is the one screen every user
+# sees. It is a resource reference too, so a manifest naming @mipmap/ic_launcher
+# with the drawable absent links and installs just as quietly. The badging line
+# names the resolved file, which is the adaptive-icon XML and not a PNG: there is
+# no density-specific fallback to fall back to, because minSdkVersion 26 is the
+# API adaptive icons arrived in.
+appline=$(printf '%s\n' "$badging" | grep '^application:' | head -1)
+case "$appline" in
+*"icon='res/mipmap-anydpi-v26/ic_launcher.xml'"*)
+    ok "the launcher icon is the adaptive icon" ;;
+*)
+    bad "the app does not declare the adaptive launcher icon: $appline" ;;
+esac
+# roundIcon is not in the badging output, only in the manifest, and a device
+# that asks for the round variant gets the default robot if it is missing.
+printf '%s\n' "$xmltree" | grep -q 'roundIcon' \
+    && ok "the manifest declares android:roundIcon" \
+    || bad "the manifest does not declare android:roundIcon"
+
 # --- the contents -----------------------------------------------------------
 list=$(unzip -l "$APK" 2>/dev/null)
 [ -n "$list" ] || { bad "the APK is not a readable zip"; list=""; }
@@ -117,7 +138,13 @@ for entry in classes.dex \
              lib/arm64-v8a/libprobe.so lib/arm64-v8a/libappseccomp.so \
              lib/arm64-v8a/libumusb.so \
              assets/initramfs.cpio.gz \
-             res/xml/device_filter.xml; do
+             res/xml/device_filter.xml \
+             res/mipmap-anydpi-v26/ic_launcher.xml \
+             res/mipmap-anydpi-v26/ic_launcher_round.xml \
+             res/drawable/ic_launcher_background.xml \
+             res/drawable/ic_launcher_foreground.xml \
+             res/drawable/ic_launcher_monochrome.xml \
+             res/drawable/ic_notification.xml; do
     if printf '%s\n' "$list" | grep -q " $entry\$"; then
         size=$(printf '%s\n' "$list" | awk -v e="$entry" '$NF == e { print $1 }')
         ok "$entry is in the APK ($size bytes)"

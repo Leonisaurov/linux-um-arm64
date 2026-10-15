@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The launcher icon's background layer.
+
+  A full-bleed 108x108, which is the size every adaptive-icon layer is drawn at:
+  the launcher crops it to whatever shape it wants and animates it, so only the
+  centre is guaranteed to survive. Pale ice, because the foreground is a black
+  penguin and black on dark is a silhouette nobody can read, but a *gradient*
+  ice, since a flat fill makes the mask's edge invisible.
+
+  Colors are literal rather than @color references: the app's own palette is
+  reskinned at runtime from the Material You accents (res/values-v31/colors.xml)
+  for the terminal UI, and a launcher icon that changed with the wallpaper's
+  accent would stop being an icon and start being a mood.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="0"
+                android:startY="0"
+                android:endX="108"
+                android:endY="108">
+                <item android:offset="0" android:color="#FFEFF8FA" />
+                <item android:offset="1" android:color="#FFB4D2DC" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>
