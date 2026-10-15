@@ -23,6 +23,13 @@
 #
 #   * <share>/umalpine-hostname, if the launcher wrote one, names the machine.
 #
+#   * `ubd1=` is the persistent data disk. When it is there this sources
+#     /umarm-data.sh, which formats it on first boot, seeds it from the base
+#     image once, and bind-mounts /home, /var/lib/docker, /var/lib/umarm and
+#     /root onto it. That is what lets a guest-image update replace the base
+#     without touching the user's files. Without ubd1 the base keeps its own
+#     directories, so every gate and the harness are unaffected.
+#
 # The Docker image is the same image as the plain one, with dockerd installed;
 # this script starts it whether or not the service system works. See
 # doc/80-docker-alpine.md.
@@ -96,6 +103,14 @@ if [ -n "$share" ]; then
 	fi
 else
 	log "no umarm.share= on the command line, so there is no /host"
+fi
+
+# --- the persistent data disk -----------------------------------------------
+# Mount before anything reads /home or starts dockerd, so the wizard creates the
+# user's home on the data disk and docker's state is the user's, not the base
+# image's. /umarm-data.sh is a no-op when ubd1 was not passed.
+if [ -x /umarm-data.sh ]; then
+	/umarm-data.sh
 fi
 
 # --- name the machine -------------------------------------------------------

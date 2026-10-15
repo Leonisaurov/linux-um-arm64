@@ -42,7 +42,11 @@ ALPINE_BRANCH=${ALPINE_BRANCH:-v3.21}
 # docker-compose python script.
 # doas is what lets the non-root user the first-run wizard creates become root;
 # it is setuid, so only apk (run as root below) can install it.
-PACKAGES=${PACKAGES:-"docker docker-cli-compose openrc nftables curl python3 strace doas"}
+# e2fsprogs is what /umarm-data.sh formats the persistent data disk with on
+# first boot (mkfs.ext4). Telling a formatted disk from a fresh one does not
+# need it -- that is a superblock read -- so a missing e2fsprogs only costs the
+# ability to make the data disk, not the ability to keep it.
+PACKAGES=${PACKAGES:-"docker docker-cli-compose openrc nftables curl python3 strace doas e2fsprogs"}
 
 [ "$(uname -m)" = aarch64 ] || {
 	echo "mkdockerimage.sh: needs an aarch64 host (the guest's loader is aarch64)" >&2

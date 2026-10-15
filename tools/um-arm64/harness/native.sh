@@ -35,6 +35,8 @@ MEM=${MEM:-512M}
 EXTRA_ARGS=${EXTRA_ARGS:-}
 INITRD=${INITRD:-}
 UBD0=${UBD0:-}
+UBD1=${UBD1:-}
+UBD1_SIZE=${UBD1_SIZE:-512M}
 INIT=${INIT:-/bin/sh}
 STUB_EXE=${STUB_EXE:-}
 PRELOAD=${PRELOAD:-}
@@ -127,6 +129,19 @@ CMDLINE="mem=$MEM panic=-1 init=$INIT con=$CON con0=$CON0 $EXTRA_ARGS"
 [ -n "$STUB_EXE" ] && CMDLINE="stub_exe=$STUB_EXE $CMDLINE"
 [ -n "$INITRD" ] && CMDLINE="initrd=$INITRD $CMDLINE"
 [ -n "$UBD0" ] && CMDLINE="ubd0=$UBD0 root=/dev/ubda $CMDLINE"
+# A second disk, for the gate that exercises the persistent data disk the app
+# keeps the user's files on. UML does not create the backing file, so a gate
+# that asks for one gets a sparse file of the size it named; the guest
+# formatting it is the thing under test, so it must not be pre-formatted here.
+if [ -n "$UBD1" ]; then
+    if [ ! -e "$UBD1" ]; then
+        truncate -s "${UBD1_SIZE:-512M}" "$UBD1" || {
+            echo "native.sh: cannot create UBD1=$UBD1" >&2
+            exit 2
+        }
+    fi
+    CMDLINE="ubd1=$UBD1 $CMDLINE"
+fi
 if [ -n "$HOSTFS" ]; then
     mkdir -p "$HOSTFS"
     [ -d "$HOSTFS" ] || { echo "native.sh: HOSTFS=$HOSTFS is not a directory" >&2; exit 2; }

@@ -1,0 +1,69 @@
+#!/bin/sh
+# Gate for the persistent data disk (harness/guest/umarm-data.sh).
+#
+# Booted with init=/data-init on the Docker image with a second, unformatted
+# disk as ubd1 (native.sh makes the sparse file). The three things it proves, in
+# order:
+#
+#   1. a fresh disk is formatted, and every persistent path ends up on it;
+#   2. the once-only seeding carries over what the base image already had --
+#      the transition from the old single-disk layout;
+#   3. a second mount, which is what the next boot is, keeps what the first one
+#      wrote, so the data really does outlive the base image.
+#
+# Prints UMARM_DATA_OK; any GATE_DATA_FAIL line is the diagnosis.
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+export PATH
+
+fail() { echo "GATE_DATA_FAIL $*"; exit 1; }
+
+mount -t proc     none /proc 2>/dev/null
+mount -t sysfs    none /sys  2>/dev/null
+mount -t devtmpfs none /dev  2>/dev/null
+
+[ -b /dev/ubdb ] || fail "no /dev/ubdb: the data disk (ubd1) did not appear"
+
+# Seed the base the way the old single-disk layout left it, so the first-format
+# migration has something to carry over. This runs *before* umarm-data.sh, which
+# is exactly the order a real transition has: the base still holds the data.
+mkdir -p /home /var/lib/umarm
+echo legacy-home > /home/legacy.txt
+echo legacy-user > /var/lib/umarm/user
+
+/umarm-data.sh || fail "/umarm-data.sh returned non-zero"
+
+# 1. every persistent path is a bind mount from the data disk, and the disk
+#    itself is mounted. The patterns are anchored at the start of the line
+#    because /proc/mounts puts the source there.
+grep -q "^/dev/ubdb /data " /proc/mounts || fail "/data is not mounted from /dev/ubdb"
+for d in /home /var/lib/docker /var/lib/umarm /root; do
+	grep -q "^/dev/ubdb $d " /proc/mounts || fail "$d is not bind-mounted from /dev/ubdb"
+done
+
+# 2. the seed survived the bind, which is the migration working.
+[ "$(cat /home/legacy.txt 2>/dev/null)" = legacy-home ] ||
+	fail "the seeded /home/legacy.txt is missing"
+[ "$(cat /var/lib/umarm/user 2>/dev/null)" = legacy-user ] ||
+	fail "the seeded wizard record is missing"
+
+# 3. write to the user's directories, then unmount and remount the way the next
+#    boot would. A reformatted disk -- the failure this guards against -- would
+#    come back empty.
+echo kept > /home/kept.txt
+echo pulled > /var/lib/docker/gate-image
+echo rootfile > /root/rootfile
+sync
+for d in /home /var/lib/docker /var/lib/umarm /root; do umount "$d" 2>/dev/null; done
+umount /data 2>/dev/null
+
+/umarm-data.sh || fail "/umarm-data.sh failed on the second mount"
+[ "$(cat /home/kept.txt 2>/dev/null)" = kept ] ||
+	fail "/home/kept.txt did not survive the remount (was the disk reformatted?)"
+[ "$(cat /var/lib/docker/gate-image 2>/dev/null)" = pulled ] ||
+	fail "the docker data did not survive the remount"
+[ "$(cat /home/legacy.txt 2>/dev/null)" = legacy-home ] ||
+	fail "the seeded file did not survive the remount"
+
+echo UMARM_DATA_OK
+sync
+exec /umarm-poweroff

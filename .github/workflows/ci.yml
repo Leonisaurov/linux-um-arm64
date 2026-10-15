@@ -1093,6 +1093,12 @@ jobs:
           # user, doas for wheel, and a controlling tty. All three are invisible
           # to root, which is why they survived until the app was used as one.
           - { name: console,       kernel: docker,  ubd0: alpine-docker.ext4, init: /console-init,   marker: UMARM_CONSOLE_OK, timeout: "300", extra: "rw" }
+          # --- the persistent data disk: the second disk the app keeps /home,
+          # /var/lib/docker, /var/lib/umarm and /root on, so a guest-image
+          # update replaces the base without touching them. The gate formats it,
+          # seeds it from the base, unmounts and remounts it, and reads back
+          # what it wrote. See harness/guest/data-init and doc/85-data-disk.md.
+          - { name: data,          kernel: docker,  ubd0: alpine-docker.ext4, init: /data-init,      marker: UMARM_DATA_OK,    timeout: "300", extra: "rw", data: "yes" }
           # --- the rss counters, at both page sizes, plus the negative control
           # that gives the clean runs their meaning.
           #
@@ -1179,7 +1185,7 @@ jobs:
             bash tools/um-arm64/harness/mkrootfs.sh "$RUNNER_TEMP/artifacts/debian.ext4"
 
       # The docker image travels gzipped to keep the artifact every matrix row
-      # downloads small; only the rc-docker row pays to unpack it.
+      # downloads small; the rows that boot it pay to unpack it.
       - name: Unpack the docker image
         if: matrix.ubd0 == 'alpine-docker.ext4'
         run: |
@@ -1234,6 +1240,10 @@ jobs:
           export EXTRA_ARGS="${{ matrix.extra }}"
           [ -z "${{ matrix.initrd }}" ] || export INITRD="$RUNNER_TEMP/artifacts/${{ matrix.initrd }}"
           [ -z "${{ matrix.ubd0 }}" ]   || export UBD0="$RUNNER_TEMP/artifacts/${{ matrix.ubd0 }}"
+          # The data disk is created by native.sh, not shipped as an artifact:
+          # it has to start unformatted, because formatting it is what the gate
+          # tests.
+          [ "${{ matrix.data }}" != "yes" ] || export UBD1="$RUNNER_TEMP/data.ext4"
           # Per-kernel files live next to the kernel they were built with, not at
           # the artifact root: the build job writes two kernels into two
           # directories, and only the shared fixtures (initramfs, disk images)

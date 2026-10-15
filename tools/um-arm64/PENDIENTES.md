@@ -115,8 +115,12 @@ difieren. "Keep" recuerda esa versión, así que la pregunta se hace una vez por
 imagen, y en Settings hay una entrada que vuelve a preguntar a propósito. La
 descarga va al cache y a los files de la app: archivo temporal, chequeo de md5,
 gunzip a `rootfs.ext4.new` y rename sobre `rootfs.ext4`, para que la imagen que
-el guest está booteando nunca quede a medio escribir. Imagen nueva es instalación
-nueva, así que se escribe el mismo marcador `first-run` y corre el asistente. Un
+el guest está booteando nunca quede a medio escribir. La imagen nueva reemplaza
+sólo la base: los datos del usuario (`/home`, `/var/lib/docker`, el registro del
+asistente) viven en un segundo disco que no se toca, así que el asistente no
+vuelve a correr ni se pierden archivos ni contenedores. Ver `doc/85-data-disk.md`;
+nótese que la *primera* actualización desde una instalación de un solo disco sí
+pierde lo viejo —todavía no hay disco de datos— y de ahí en adelante ya no. Un
 build puede seguir metiendo una imagen con `ROOTFS_GZ` para correr sin red, y
 `ci-umapp.sh` acepta las dos formas.
 
@@ -275,8 +279,10 @@ del `chmod -R a+rX`, con la verificación al lado:
 **Verificación.** El gate `console` pasa ahora *pudiendo* fallar. Después: el job
 `build` reconstruye la imagen y `publish` saca un `rootfs-*` nuevo solo —los dos
 archivos entran en el hash de la receta, así que esta vez sí publica—, y en el
-teléfono hay que **reinstalar la imagen** (el guest se pierde y el asistente
-vuelve a correr) y comprobar `doas id -u` = 0 como el usuario nuevo. El arreglo
+teléfono hay que **reinstalar la imagen** y comprobar `doas id -u` = 0 como el
+usuario. Con el disco de datos (`doc/85-data-disk.md`) el usuario y sus archivos
+se conservan y el asistente no vuelve a correr; la primera reinstalación desde
+una instalación vieja de un solo disco todavía los pierde. El arreglo
 de `console-init` también hace que la causa no pueda volver a pasar inadvertida.
 ## Sin probar (resultados nulos, con razón)
 

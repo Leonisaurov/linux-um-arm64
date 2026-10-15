@@ -77,13 +77,18 @@ import java.io.RandomAccessFile;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.security.MessageDigest;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.GZIPInputStream;
+import java.util.zip.GZIPOutputStream;
 
 /**
  * A Linux kernel, running inside an ordinary Android app, on a real terminal.
@@ -136,6 +141,23 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
     private static final String IMAGE_NAME = "rootfs.ext4";
     private static final String IMAGE_VERSION = "rootfs.version";
     private static final String IMAGE_SKIPPED = "skipped-image";
+
+    /*
+     * The guest's data disk: a second file, separate from the base image, that
+     * the guest mounts at /data and bind-mounts /home, /var/lib/docker,
+     * /var/lib/umarm and /root onto. Installing a new guest image replaces the
+     * base only -- a different file -- so a rootfs fix arrives without touching
+     * anything the user made. The file is created here as a sparse 2 GiB
+     * allocation and formatted by the guest's init on first boot; the app only
+     * ever replaces it on a restore.
+     */
+    private static final String DATA_NAME = "data.ext4";
+    private static final long DATA_SIZE = 2L << 30;
+    private static final String BACKUP_DIR = "backups";
+    private static final String BACKUP_PREFIX = "data-";
+    private static final String BACKUP_SUFFIX = ".ext4.gz";
+    /* How many automatic/manual backups to keep before the oldest is dropped. */
+    private static final int BACKUPS_KEPT = 3;
 
     /*
      * The app's own releases, tagged with the recipe digest build-apk.sh bakes
@@ -399,6 +421,20 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         });
         drawerItem(v, "Check for an app update", new View.OnClickListener() {
             @Override public void onClick(View w) { closeDrawer(); checkAppUpdateAsync(true); }
+        });
+
+        drawerSection(v, "Data");
+        drawerItem(v, "Back up guest data", new View.OnClickListener() {
+            @Override public void onClick(View w) { closeDrawer(); manualBackup(); }
+        });
+        drawerItem(v, "Restore guest data", new View.OnClickListener() {
+            @Override public void onClick(View w) { closeDrawer(); chooseRestore(); }
+        });
+        drawerItem(v, "Export a backup\u2026", new View.OnClickListener() {
+            @Override public void onClick(View w) { closeDrawer(); exportBackup(); }
+        });
+        drawerItem(v, "Import a backup\u2026", new View.OnClickListener() {
+            @Override public void onClick(View w) { closeDrawer(); importBackup(); }
         });
 
         drawerSection(v, "Keys");
@@ -759,13 +795,22 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
     @Override
     protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
-        if (request != PICK_FONT || result != RESULT_OK
-                || data == null || data.getData() == null)
+        if (result != RESULT_OK || data == null || data.getData() == null) {
+            if (request == EXPORT_BACKUP || request == IMPORT_BACKUP)
+                toast("cancelled");
             return;
+        }
+        Uri uri = data.getData();
+        if (request == PICK_FONT) loadFont(uri);
+        else if (request == EXPORT_BACKUP) exportBackupTo(uri);
+        else if (request == IMPORT_BACKUP) importBackupFrom(uri);
+    }
+
+    private void loadFont(Uri uri) {
         File out = new File(getFilesDir(), "terminal.ttf");
         try {
-            InputStream in = getContentResolver().openInputStream(data.getData());
-            if (in == null) throw new IOException("cannot open " + data.getData());
+            InputStream in = getContentResolver().openInputStream(uri);
+            if (in == null) throw new IOException("cannot open " + uri);
             FileOutputStream fos = new FileOutputStream(out);
             byte[] buf = new byte[1 << 16];
             long total = 0;
@@ -774,7 +819,7 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
             fos.close();
             in.close();
             if (Typeface.createFromFile(out) == null) throw new IOException("not a font");
-            String name = displayName(data.getData());
+            String name = displayName(uri);
             fontFamily = "file:" + out.getName();
             prefs.edit().putString("fontLabel", name).apply();
             applyFont();
@@ -1164,6 +1209,18 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
             args.add("rw");
             args.add("init=/umarm-init");
             args.add("umarm.share=" + getFilesDir().getAbsolutePath());
+            /*
+             * The data disk goes on as ubd1. It is a different file from the
+             * base image, so a guest-image update cannot reach it; the guest's
+             * init formats it on the first boot that has one and mounts the
+             * user's directories from it. Missing or uncreatable is not fatal:
+             * the guest then keeps its data in the base image, as before.
+             */
+            File data = ensureGuestData();
+            if (data != null)
+                args.add("ubd1=" + data.getAbsolutePath());
+            else
+                log("no data disk: /home and docker will live on the base image\n");
         } else {
             args.add("initrd=" + initrd.getAbsolutePath());
             args.add("init=/init");
@@ -1475,6 +1532,362 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         f.close();
     }
 
+    /* ------------------------------------------------------------------
+     * The data disk, and its backups
+     * ------------------------------------------------------------------ */
+
+    /** The data disk, or null when there is none yet. */
+    private File guestData() {
+        File f = new File(getFilesDir(), DATA_NAME);
+        return (f.exists() && f.length() > 0) ? f : null;
+    }
+
+    /**
+     * The data disk, created as a sparse file the first time. The guest's init
+     * formats it (ext4) on the boot that follows, because nothing on this side
+     * can, and the block layer needs a file that exists. A failure is not
+     * fatal: the guest boots with its data in the base image, exactly as it did
+     * before the split.
+     */
+    private File ensureGuestData() {
+        File f = new File(getFilesDir(), DATA_NAME);
+        if (f.exists() && f.length() > 0)
+            return f;
+        try {
+            RandomAccessFile raf = new RandomAccessFile(f, "rw");
+            try {
+                raf.setLength(DATA_SIZE);
+            } finally {
+                raf.close();
+            }
+            log("created the data disk " + DATA_NAME + " (" + (DATA_SIZE >> 30)
+                    + " GiB, sparse; the guest formats it on the next boot)\n");
+            return f;
+        } catch (Exception e) {
+            log("cannot create the data disk: " + e + "\n");
+            f.delete();
+            return null;
+        }
+    }
+
+    /**
+     * Where backups are written: the app's external files directory when there
+     * is one, so a backup can be pulled off the phone over USB, and the private
+     * directory otherwise. Created on demand.
+     */
+    private File backupsDir() {
+        File base = getExternalFilesDir(null);
+        if (base == null) base = getFilesDir();
+        File d = new File(base, BACKUP_DIR);
+        d.mkdirs();
+        return d;
+    }
+
+    private static String stamp() {
+        return new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date());
+    }
+
+    /** Backups, newest first. */
+    private List<File> listBackups() {
+        File[] all = backupsDir().listFiles();
+        List<File> out = new ArrayList<File>();
+        for (int i = 0; all != null && i < all.length; i++) {
+            String n = all[i].getName();
+            if (n.startsWith(BACKUP_PREFIX) && n.endsWith(BACKUP_SUFFIX))
+                out.add(all[i]);
+        }
+        Collections.sort(out, new Comparator<File>() {
+            @Override public int compare(File a, File b) {
+                return b.getName().compareTo(a.getName());
+            }
+        });
+        return out;
+    }
+
+    /** Drop the oldest backups, so a series of updates cannot fill the disk. */
+    private void pruneBackups() {
+        List<File> all = listBackups();
+        for (int i = BACKUPS_KEPT; i < all.size(); i++)
+            all.get(i).delete();
+    }
+
+    private void manualBackup() {
+        if (guestData() == null) { toast("there is no data disk yet -- boot once"); return; }
+        if (isGuestRunning()) { toast("stop the guest first"); return; }
+        final Progress p = progressDialog("Backing up guest data");
+        new Thread(new Runnable() {
+            @Override public void run() { runBackup(p); }
+        }, "umarm-backup").start();
+    }
+
+    private void runBackup(Progress p) {
+        String ok = null, err = null;
+        try {
+            File data = guestData();
+            if (data == null) throw new IOException("there is no data disk");
+            File out = new File(backupsDir(), BACKUP_PREFIX + stamp() + BACKUP_SUFFIX);
+            gzipFile(data, out, p);
+            pruneBackups();
+            ok = "backed up to " + out.getName() + " (" + (out.length() >> 20) + " MB)";
+            log("backup: " + ok + "\n");
+        } catch (Exception e) {
+            err = e.toString();
+            log("backup failed: " + err + "\n");
+        }
+        finishOp(p, ok, err);
+    }
+
+    private void chooseRestore() {
+        if (isGuestRunning()) { toast("stop the guest first"); return; }
+        final List<File> backups = listBackups();
+        if (backups.isEmpty()) { toast("there are no backups yet"); return; }
+        final String[] names = new String[backups.size()];
+        for (int i = 0; i < backups.size(); i++)
+            names[i] = backups.get(i).getName() + "   (" + (backups.get(i).length() >> 20) + " MB)";
+        new AlertDialog.Builder(this)
+                .setTitle("Restore guest data")
+                .setItems(names, new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface d, int which) {
+                        confirmRestore(backups.get(which));
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void confirmRestore(final File backup) {
+        new AlertDialog.Builder(this)
+                .setTitle("Restore " + backup.getName())
+                .setMessage("Everything on the current data disk is replaced by this "
+                        + "backup. The guest image itself is not touched.")
+                .setPositiveButton("Restore", new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface d, int which) { startRestore(backup); }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void startRestore(final File backup) {
+        final Progress p = progressDialog("Restoring guest data");
+        new Thread(new Runnable() {
+            @Override public void run() { runRestore(backup, p); }
+        }, "umarm-restore").start();
+    }
+
+    private void runRestore(File backup, Progress p) {
+        String ok = null, err = null;
+        try {
+            File out = new File(getFilesDir(), DATA_NAME);
+            File neu = new File(getFilesDir(), DATA_NAME + ".new");
+            gunzipFile(backup, neu, p);
+            if (out.exists() && !out.delete())
+                throw new IOException("cannot replace " + out);
+            if (!neu.renameTo(out))
+                throw new IOException("cannot rename " + neu);
+            ok = "restored the data disk from " + backup.getName();
+            log("restored the data disk from " + backup.getName() + "\n");
+        } catch (Exception e) {
+            err = e.toString();
+            log("restore failed: " + err + "\n");
+        }
+        finishOp(p, ok, err);
+    }
+
+    /*
+     * Export and import go through the document picker rather than the backup
+     * directory: a backup that lives in the app's own storage is gone when the
+     * app is uninstalled, which is one of the things a backup is for. The large
+     * copy runs on a thread -- a 2 GiB image on the main thread is an ANR -- so
+     * the picker's result only starts it.
+     */
+    private static final int EXPORT_BACKUP = 42;
+    private static final int IMPORT_BACKUP = 43;
+
+    private void exportBackup() {
+        if (guestData() == null) { toast("there is no data disk yet -- boot once"); return; }
+        if (isGuestRunning()) { toast("stop the guest first"); return; }
+        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("application/gzip");
+        i.putExtra(Intent.EXTRA_TITLE, BACKUP_PREFIX + stamp() + BACKUP_SUFFIX);
+        try {
+            startActivityForResult(i, EXPORT_BACKUP);
+        } catch (Exception e) {
+            toast("no file picker here: " + e);
+        }
+    }
+
+    private void importBackup() {
+        if (isGuestRunning()) { toast("stop the guest first"); return; }
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        try {
+            startActivityForResult(i, IMPORT_BACKUP);
+        } catch (Exception e) {
+            toast("no file picker here: " + e);
+        }
+    }
+
+    private void exportBackupTo(final Uri uri) {
+        final Progress p = progressDialog("Exporting guest data");
+        new Thread(new Runnable() {
+            @Override public void run() { runExport(uri, p); }
+        }, "umarm-export").start();
+    }
+
+    private void runExport(Uri uri, Progress p) {
+        String ok = null, err = null;
+        try {
+            File data = guestData();
+            if (data == null) throw new IOException("there is no data disk");
+            OutputStream os = getContentResolver().openOutputStream(uri);
+            if (os == null) throw new IOException("cannot open " + uri);
+            gzipTo(data, os, p);
+            ok = "exported the data disk";
+            log("exported the data disk to " + uri + "\n");
+        } catch (Exception e) {
+            err = e.toString();
+            log("export failed: " + err + "\n");
+        }
+        finishOp(p, ok, err);
+    }
+
+    private void importBackupFrom(final Uri uri) {
+        final Progress p = progressDialog("Importing guest data");
+        new Thread(new Runnable() {
+            @Override public void run() { runImport(uri, p); }
+        }, "umarm-import").start();
+    }
+
+    private void runImport(Uri uri, Progress p) {
+        String ok = null, err = null;
+        try {
+            InputStream in = getContentResolver().openInputStream(uri);
+            if (in == null) throw new IOException("cannot open " + uri);
+            File out = new File(getFilesDir(), DATA_NAME);
+            File neu = new File(getFilesDir(), DATA_NAME + ".new");
+            try {
+                gunzipFrom(in, neu, p);
+            } finally {
+                in.close();
+            }
+            if (out.exists() && !out.delete())
+                throw new IOException("cannot replace " + out);
+            if (!neu.renameTo(out))
+                throw new IOException("cannot rename " + neu);
+            ok = "imported the data disk -- boot to use it";
+            log("imported the data disk from " + uri + "\n");
+        } catch (Exception e) {
+            err = e.toString();
+            log("import failed: " + err + "\n");
+        }
+        finishOp(p, ok, err);
+    }
+
+    /**
+     * Copy the data disk aside before a reinstall. The update cannot reach the
+     * data disk -- it is a different file -- so this is a second line of defence
+     * and a failure here does not stop the reinstall. Returns the backup's name,
+     * or null when there was nothing to back up or it failed.
+     */
+    private String backupBeforeUpdate(Release rel, Progress p) {
+        File data = guestData();
+        if (data == null) return null;
+        try {
+            File out = new File(backupsDir(),
+                    BACKUP_PREFIX + "before-" + rel.version + BACKUP_SUFFIX);
+            if (out.exists()) out.delete();
+            progress(p, "backing up first", 0, 0);
+            gzipFile(data, out, p);
+            pruneBackups();
+            log("backed up the data disk to " + out.getName()
+                    + " before installing " + rel.tag + "\n");
+            return out.getName();
+        } catch (Exception e) {
+            log("backup before the update failed (continuing): " + e + "\n");
+            return null;
+        }
+    }
+
+    private void gzipFile(File in, File out, Progress p) throws IOException {
+        InputStream is = new FileInputStream(in);
+        try {
+            OutputStream os = new GZIPOutputStream(new FileOutputStream(out), 1 << 16);
+            try {
+                gzipTo(is, os, in.length(), p);
+            } finally {
+                os.close();
+            }
+        } finally {
+            is.close();
+        }
+    }
+
+    private void gzipTo(File in, OutputStream os, Progress p) throws IOException {
+        InputStream is = new FileInputStream(in);
+        try {
+            gzipTo(is, os, in.length(), p);
+        } finally {
+            is.close();
+        }
+    }
+
+    private void gzipTo(InputStream is, OutputStream os, long total, Progress p) throws IOException {
+        progress(p, "compressing", 0, total);
+        byte[] buf = new byte[1 << 16];
+        long done = 0, last = 0;
+        int n;
+        while ((n = is.read(buf)) > 0) {
+            os.write(buf, 0, n);
+            done += n;
+            if (done - last >= (16L << 20)) {
+                last = done;
+                progress(p, "compressing", done, total);
+            }
+        }
+        progress(p, "compressing", done, total);
+    }
+
+    private void gunzipFile(File in, File out, Progress p) throws IOException {
+        InputStream is = new GZIPInputStream(new FileInputStream(in), 1 << 16);
+        try {
+            OutputStream os = new FileOutputStream(out);
+            try {
+                gunzipFrom(is, os, gzipIsize(in), p);
+            } finally {
+                os.close();
+            }
+        } finally {
+            is.close();
+        }
+    }
+
+    private void gunzipFrom(InputStream is, File out, Progress p) throws IOException {
+        OutputStream os = new FileOutputStream(out);
+        try {
+            gunzipFrom(is, os, 0, p);
+        } finally {
+            os.close();
+        }
+    }
+
+    private void gunzipFrom(InputStream is, OutputStream os, long raw, Progress p) throws IOException {
+        progress(p, "unpacking", 0, raw);
+        byte[] buf = new byte[1 << 16];
+        long done = 0, last = 0;
+        int n;
+        while ((n = is.read(buf)) > 0) {
+            os.write(buf, 0, n);
+            done += n;
+            if (done - last >= (8L << 20)) {
+                last = done;
+                progress(p, "unpacking", done, raw);
+            }
+        }
+        progress(p, "unpacking", done, raw);
+    }
+
     /** One published release: which one it is, what it should hash to, where. */
     private static final class Release {
         String tag;
@@ -1649,9 +2062,9 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         if (present) {
             m.append("There is a newer guest image (").append(rel.tag);
             if (mb > 0) m.append(", ").append(mb).append(" MB");
-            m.append(").\n\nReinstalling starts the guest from the new one. Files "
-                    + "you saved inside the guest and images you pulled with docker "
-                    + "live on the old one and are lost.");
+            m.append(").\n\nIt replaces the base system only. Files you saved inside the "
+                    + "guest and images you pulled with docker live on a separate data "
+                    + "disk and are kept; a backup of that disk is written first anyway.");
         } else {
             m.append("The guest image has to be downloaded once");
             if (mb > 0) m.append(" (").append(mb).append(" MB)");
@@ -1659,7 +2072,7 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
                     + "Alpine with docker and a real shell. Without it the app boots "
                     + "a small rescue shell instead.");
         }
-        new AlertDialog.Builder(this)
+        AlertDialog.Builder b = new AlertDialog.Builder(this)
                 .setTitle(present ? "New guest image" : "Guest image")
                 .setMessage(m.toString())
                 .setPositiveButton(present ? "Reinstall" : "Download",
@@ -1667,15 +2080,66 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
                             @Override public void onClick(DialogInterface d, int which) {
                                 downloadImage(rel);
                             }
-                        })
-                .setNegativeButton(present ? "Keep" : "Not now",
-                        new DialogInterface.OnClickListener() {
-                            @Override public void onClick(DialogInterface d, int which) {
-                                if (present)
-                                    prefs.edit().putString(IMAGE_SKIPPED, rel.tag).apply();
-                            }
-                        })
+                        });
+        if (present) {
+            b.setNeutralButton("Back up first", new DialogInterface.OnClickListener() {
+                @Override public void onClick(DialogInterface d, int which) {
+                    backupThenAsk(rel);
+                }
+            });
+        }
+        b.setNegativeButton(present ? "Keep" : "Not now",
+                new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface d, int which) {
+                        if (present)
+                            prefs.edit().putString(IMAGE_SKIPPED, rel.tag).apply();
+                    }
+                })
                 .show();
+    }
+
+    /**
+     * The update dialog's "Back up first": copy the data disk, then ask the
+     * same question again so the reinstall is one tap away. The copy that
+     * matters is the automatic one in runImageDownload, which happens even when
+     * this is never pressed; this is for someone who wants the backup before
+     * deciding.
+     */
+    private void backupThenAsk(final Release rel) {
+        if (guestData() == null) { toast("there is no data disk to back up yet"); return; }
+        final Progress p = progressDialog("Backing up guest data");
+        new Thread(new Runnable() {
+            @Override public void run() { runBackupThenAsk(rel, p); }
+        }, "umarm-backup-update").start();
+    }
+
+    private void runBackupThenAsk(Release rel, Progress p) {
+        String name = null, err = null;
+        try {
+            File data = guestData();
+            if (data == null) throw new IOException("there is no data disk");
+            File out = new File(backupsDir(), BACKUP_PREFIX + stamp() + BACKUP_SUFFIX);
+            gzipFile(data, out, p);
+            pruneBackups();
+            name = out.getName();
+            log("backed up the data disk to " + name + "\n");
+        } catch (Exception e) {
+            err = e.toString();
+            log("backup failed: " + err + "\n");
+        }
+        finishBackupThenAsk(p, name, err, rel);
+    }
+
+    private void finishBackupThenAsk(final Progress p, final String name,
+            final String err, final Release rel) {
+        ui.post(new Runnable() {
+            @Override public void run() {
+                p.dialog.dismiss();
+                if (err != null) toast("backup failed: " + err);
+                else toast("backed up to " + name);
+                askImage(rel, true);
+            }
+        });
     }
 
     private void askAppUpdate(final Release rel, final boolean have) {
@@ -1806,8 +2270,22 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
         String ok = "guest image " + rel.tag + " installed -- Boot to use it";
         try {
             File gz = downloadToCache(rel, IMAGE_ASSET, p);
-            if (gz == null) ok = null;                 /* cancelled */
-            else installImage(gz, rel.tag, p);
+            if (gz == null) {
+                ok = null;                             /* cancelled */
+            } else {
+                /*
+                 * The data disk is a different file and the install below only
+                 * replaces the base, so the user's data survives the update
+                 * whether or not this succeeds. It is copied anyway, because
+                 * "your data is kept" is worth being able to prove, and because
+                 * it is the only history a reinstall leaves behind.
+                 */
+                String bak = backupBeforeUpdate(rel, p);
+                installImage(gz, rel.tag, p);
+                if (bak != null)
+                    ok = "guest image " + rel.tag + " installed (data backed up to "
+                            + bak + ") -- Boot to use it";
+            }
         } catch (Exception e) {
             err = e.toString();
             ok = null;
@@ -1922,6 +2400,21 @@ public class MainActivity extends Activity implements TerminalViewClient, Termin
                 } else if (ok != null) {
                     toast(ok);
                 }
+            }
+        });
+    }
+
+    /*
+     * The same for the data-disk operations, which are not downloads. One level
+     * of anonymous class only, for the d8 reason above.
+     */
+    private void finishOp(final Progress p, final String ok, final String err) {
+        ui.post(new Runnable() {
+            @Override public void run() {
+                p.dialog.dismiss();
+                if (err != null) toast("failed: " + err);
+                else if (p.cancelled[0]) toast("cancelled");
+                else if (ok != null) toast(ok);
             }
         });
     }

@@ -31,6 +31,9 @@
 #   UMALPINE_DOCKER=1             same as --docker
 #   UMALPINE_HOSTNAME             guest hostname (default umalpine)
 #   UMALPINE_SHARE                host directory shared with the guest as /host
+#   UMALPINE_DATA                 second disk, the guest's persistent data disk
+#                                 (ubd1); made empty when the file is missing
+#   UMALPINE_DATA_SIZE (default 512M)   its size when it has to be created
 set -uo pipefail
 
 usage() {
@@ -204,6 +207,15 @@ fi
 [ "$MISSING" = 0 ] || die "one or more pieces are missing (see the list above)"
 [ -r "$KERNEL" ] || die "kernel is not readable: $KERNEL"
 [ -r "$IMAGE" ]  || die "image is not readable: $IMAGE"
+
+# The persistent data disk the app passes as ubd1. A run that asks for one gets
+# the same two-disk layout, so /umarm-data.sh is exercised the way the app
+# exercises it. Created empty when absent: the guest formats it, which is the
+# behavior under test, so it must not be pre-formatted here.
+DATA=${UMALPINE_DATA:-}
+if [ -n "$DATA" ] && [ ! -e "$DATA" ]; then
+	truncate -s "${UMALPINE_DATA_SIZE:-512M}" "$DATA" || die "cannot create the data disk $DATA"
+fi
 maybe_configure_kernel || die "could not make $KERNEL runnable on this host"
 
 # --- the host share the guest mounts as /host -------------------------------
@@ -265,6 +277,7 @@ MEM=${UMALPINE_MEM:-512M}
 INIT=${UMALPINE_INIT:-/umarm-init}
 COMMON=(mem="$MEM" ubd0="$IMAGE" root=/dev/ubda rw init="$INIT"
 	umarm.share="$SHARE" panic=-1 con=null seccomp=auto)
+[ -n "$DATA" ] && COMMON=(ubd1="$DATA" "${COMMON[@]}")
 [ -n "$STUB" ] && COMMON=(stub_exe="$STUB" "${COMMON[@]}")
 
 NET_CMD=()

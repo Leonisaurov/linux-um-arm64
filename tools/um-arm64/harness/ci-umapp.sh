@@ -214,6 +214,20 @@ if unzip -p "$APK" classes.dex > "$tmp/dex" 2>/dev/null; then
     done
 fi
 
+# The data disk is what keeps the user's files across a guest-image update: it
+# is a second file, passed as ubd1, that a reinstall does not touch. The two
+# strings that wire it up have to survive the dex, because a build that lost
+# them would still install the image and then lose /home on the next update.
+if unzip -p "$APK" classes.dex > "$tmp/dex" 2>/dev/null; then
+    for s in "data.ext4" "ubd1="; do
+        if grep -aq "$s" "$tmp/dex"; then
+            ok "classes.dex carries the data-disk string $s"
+        else
+            bad "classes.dex is missing the data-disk string $s"
+        fi
+    done
+fi
+
 # The same, for the half that updates the app itself: the provider the installer
 # reads through, the authority it is reached by, the MIME type the installer
 # matches on, and the manifest key the recipe is read from.

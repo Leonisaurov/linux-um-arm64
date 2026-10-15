@@ -453,6 +453,10 @@ On the first app boot the guest offers to create that user: the app writes
 turns it into a wizard (username, password, optional root password), adds the
 user to `wheel` and `docker`, records it in `/var/lib/umarm/user`, and from then
 on logs in as it. The marker is written by the app and removed by the guest, so
-the harness and the gates boot the image unchanged and as root, and neither the
-second boot nor a freshly installed image has it. Reinstalling an image runs the
-wizard again, because a fresh image is a fresh install.
+the harness and the gates boot the image unchanged and as root.
+
+The record is on the guest's data disk, not in the image, so reinstalling an
+image does *not* run the wizard again: it starts a new base with the same user.
+The app still writes `first-run` on every install, and the guest skips the wizard
+because the record is there. That, and the `/home` and `/var/lib/docker` the disk
+keeps, is `doc/85-data-disk.md`.
