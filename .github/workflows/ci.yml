@@ -1301,6 +1301,42 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # Growing a disk is two boots -- the file is enlarged in between -- so it
+  # cannot be a matrix row. The guest is the same docker image the app ships,
+  # and the two boots share one data disk, exactly as an app update would.
+  grow:
+    name: grow
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: um-arm64-kernels
+          path: ${{ runner.temp }}/artifacts
+
+      - name: Relax ptrace scope
+        run: |
+          cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo "no yama"
+          sudo sysctl -w kernel.yama.ptrace_scope=0 || true
+
+      - name: Unpack the docker image
+        run: |
+          set -euo pipefail
+          gunzip -kf "$RUNNER_TEMP/artifacts/alpine-docker.ext4.gz"
+          ls -la "$RUNNER_TEMP/artifacts/alpine-docker.ext4"
+
+      - name: Growth gate (two boots, same data disk)
+        run: |
+          set -euo pipefail
+          BIN="$RUNNER_TEMP/artifacts/docker/linux-um-arm64" \
+          IMG="$RUNNER_TEMP/artifacts/alpine-docker.ext4" \
+            bash tools/um-arm64/harness/growfs.sh
+
 # A comment, deliberately: this file is not an input to the APK or to its
 # recipe, so a commit that touches only this must not move either one. It exists
 # to check that the bionic kernel stopped carrying the repository HEAD.
