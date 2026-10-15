@@ -29,7 +29,7 @@ boot() { # boot <gate> <log> [ubd1-size]
 	BIN="$BIN" ART="$T/art" GATE="$gate" INIT=/grow-init \
 		MARKER=UMARM_GROW_OK EXTRA_ARGS=rw MEM=512M \
 		UBD1_SIZE="$size" UBD0="$T/base.ext4" UBD1="$T/data.ext4" \
-		"$HERE/native.sh" >"$log" 2>&1
+		bash "$HERE/native.sh" >"$log" 2>&1
 }
 
 # Boot 1: a 256 MiB data disk and the release-sized base. This formats and
@@ -37,7 +37,8 @@ boot() { # boot <gate> <log> [ubd1-size]
 echo "growfs: boot 1 (256M data disk)"
 boot growth-1 "$T/boot1.log" 256M || {
 	grep -a 'GATE_GROW_FAIL' "$T/art/growth-1-latest/boot.log" 2>/dev/null || true
-	echo "growfs.sh: the first boot failed; see $T/boot1.log and suffix .1" >&2
+	echo "growfs.sh: the first boot failed; tail of $T/boot1.log" >&2
+	tail -30 "$T/boot1.log" >&2 || true
 	cp -r "$T" "${TMPDIR:-/tmp}/umarm-growfs-failed" 2>/dev/null || true
 	exit 1
 }
@@ -51,7 +52,8 @@ truncate -s 1536M "$T/base.ext4"
 
 echo "growfs: boot 2 (768M data disk, 1.5G base)"
 boot growth-2 "$T/boot2.log" || {
-	echo "growfs.sh: the second boot failed; see $T/boot2.log" >&2
+	echo "growfs.sh: the second boot failed; tail of $T/boot2.log" >&2
+	tail -30 "$T/boot2.log" >&2 || true
 	exit 1
 }
 b2=$(grep -ao 'GATE_GROW base_blocks=[0-9]* data_blocks=[0-9]*' \
